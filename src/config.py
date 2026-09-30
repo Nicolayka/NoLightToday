@@ -52,7 +52,4 @@ BOT_USERNAME = "NoLightToday_bot"   # без @, для deep-link
 # Формат: http://user:pass@host:port или socks5://user:pass@host:port
 # Пусто = без прокси (для серверов вне РФ).
 import os
-TELEGRAM_PROXY = os.getenv(
-    "TELEGRAM_PROXY",
-    "http://icvtesi0:REMOVED_PASSWORD@46.17.98.45:30430",
-)
+TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "").strip()

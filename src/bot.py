@@ -48,8 +48,10 @@ from config import BOT_TOKEN, TELEGRAM_PROXY
 # Если TELEGRAM_PROXY пуст — работаем напрямую.
 if TELEGRAM_PROXY:
     _session = AiohttpSession(proxy=TELEGRAM_PROXY)
+    log.info("Telegram через прокси: %s", TELEGRAM_PROXY.split("@")[-1])
 else:
     _session = AiohttpSession()
+    log.info("Telegram напрямую (без прокси)")
 
 bot = Bot(token=BOT_TOKEN, session=_session)
 dp = Dispatcher()
