@@ -4,7 +4,7 @@ from collections import defaultdict
 from aiogram import Bot
 
 import db
-import time
+import re
 from config import CHECK_INTERVAL
 from parser import parse_outages
 
@@ -48,7 +48,6 @@ def format_outage(o: dict) -> str:
     Адрес разбивается на отдельные части (тер., д., ул., СНТ и т.д.).
     Логические блоки разделены пустой строкой для читаемости.
     """
-    import re
 
     # Каждый блок — отдельный список строк
     blocks: list[str] = []
@@ -124,7 +123,6 @@ def _pretty_dt(value: str) -> str:
     Меняет только разделители в дате (дефис → точка), время не трогает.
     Если формат не распознан — возвращает исходную строку.
     """
-    import re
 
     if not value:
         return value
@@ -151,11 +149,12 @@ async def notify_all(bot: Bot, outages: list[dict]) -> None:
     chats = await db.get_all_chats_with_subs()
 
     for chat_id in chats:
-        subs = await db.get_subscriptions(chat_id)   # [(locality, priority), ...]
+        subs = await db.get_subscriptions(chat_id)
         if not subs:
             continue
         loc_to_prio = {loc.lower(): prio for loc, prio in subs}
 
+        # Ищем совпадения по district + address + locality
         relevant = [
             o for o in outages
             if any(matches_locality(o, loc) for loc in loc_to_prio)
@@ -166,6 +165,9 @@ async def notify_all(bot: Bot, outages: list[dict]) -> None:
         by_date: dict[str, list[dict]] = defaultdict(list)
         for o in relevant:
             by_date[o["date_key"]].append(o)
+
+        # Куда писать: thread_id из настроек чата (если форум)
+        thread_id = await db.get_chat_thread(chat_id)
 
         for date_key, items in by_date.items():
             def prio_of(rec: dict) -> int:
@@ -187,19 +189,14 @@ async def notify_all(bot: Bot, outages: list[dict]) -> None:
                     f"в других НП. Откройте «📅 Отключения → {date_key}» в меню."
                 )
 
-            from aiogram.exceptions import TelegramRetryAfter
-
             try:
-                await bot.send_message(chat_id, _truncate(text), parse_mode="HTML")
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=_truncate(text),
+                    parse_mode="HTML",
+                    message_thread_id=thread_id,
+                )
                 await db.mark_sent(chat_id, main["id"])
-            except TelegramRetryAfter as e:
-                print(f"[notify] flood control, retry in {e.retry_after}s")
-                await asyncio.sleep(e.retry_after + 1)
-                try:
-                    await bot.send_message(chat_id, _truncate(text), parse_mode="HTML")
-                    await db.mark_sent(chat_id, main["id"])
-                except Exception as e2:
-                    print(f"[notify] повторная попытка: {e2}")
             except Exception as e:
                 print(f"[notify] чат {chat_id}: {e}")
 

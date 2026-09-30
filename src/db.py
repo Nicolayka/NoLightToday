@@ -44,6 +44,20 @@ CREATE TABLE IF NOT EXISTS awaiting_input (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS chat_settings (
+    chat_id    INTEGER PRIMARY KEY,
+    thread_id  INTEGER,              -- NULL = основная тема / не форум
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS forum_topics (
+    chat_id    INTEGER NOT NULL,
+    thread_id  INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (chat_id, thread_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_subs_chat  ON subscriptions(chat_id);
 CREATE INDEX IF NOT EXISTS idx_cache_date ON outage_cache(date_key);
 """
@@ -311,3 +325,55 @@ async def clear_awaiting(user_id: int) -> None:
             "DELETE FROM awaiting_input WHERE user_id = ?", (user_id,)
         )
         await db.commit()
+        
+# ---------- Настройки чата (тема форума) ----------
+
+async def set_chat_thread(chat_id: int, thread_id: int | None) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO chat_settings (chat_id, thread_id) "
+            "VALUES (?, ?)",
+            (chat_id, thread_id),
+        )
+        await db.commit()
+
+
+async def get_chat_thread(chat_id: int) -> int | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT thread_id FROM chat_settings WHERE chat_id = ?",
+            (chat_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+
+# ---------- Темы форума ----------
+
+async def upsert_topic(chat_id: int, thread_id: int, name: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO forum_topics (chat_id, thread_id, name) "
+            "VALUES (?, ?, ?)",
+            (chat_id, thread_id, name),
+        )
+        await db.commit()
+
+
+async def delete_topic(chat_id: int, thread_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM forum_topics WHERE chat_id = ? AND thread_id = ?",
+            (chat_id, thread_id),
+        )
+        await db.commit()
+
+
+async def get_topics(chat_id: int) -> list[tuple[int, str]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT thread_id, name FROM forum_topics WHERE chat_id = ? "
+            "ORDER BY name",
+            (chat_id,),
+        ) as cur:
+            return [(r[0], r[1]) for r in await cur.fetchall()]

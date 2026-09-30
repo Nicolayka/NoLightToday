@@ -11,6 +11,8 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
+    ForumTopicCreated,
+    ForumTopicEdited,
     InlineKeyboardMarkup,
     Message,
 )
@@ -82,14 +84,28 @@ async def safe_edit_markup(cb: CallbackQuery, reply_markup) -> None:
 
 
 async def is_group_admin(chat_id: int, user_id: int) -> bool:
-    """Проверяет через Telegram, является ли пользователь админом группы."""
     try:
+        chat = await bot.get_chat(chat_id)
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        if chat.type == "channel":
+            # В канале пользователь-админ должен иметь право постить
+            return (
+                member.status in ("administrator", "creator")
+                and getattr(member, "can_post_messages", False)
+            )
         return member.status in ("administrator", "creator")
     except Exception as e:
         log.debug("get_chat_member(%s, %s): %s", chat_id, user_id, e)
         return False
 
+
+async def chat_kind(chat_id: int) -> str:
+    """Возвращает 'group', 'supergroup', 'channel' или 'unknown'."""
+    try:
+        chat = await bot.get_chat(chat_id)
+        return chat.type
+    except Exception:
+        return "unknown"
 
 async def user_admin_groups(user_id: int) -> list[tuple[int, str]]:
     """Возвращает [(chat_id, title)] — группы, где пользователь админ."""
@@ -121,9 +137,10 @@ def main_menu_kb(chat_id: int) -> InlineKeyboardMarkup:
     b.button(text="⚙️ Подписки", callback_data=f"m:subs:{chat_id}")
     b.button(text="🏆 Приоритет", callback_data=f"m:prio:{chat_id}")
     b.button(text="📅 Отключения", callback_data=f"m:dates:{chat_id}")
+    b.button(text="🎯 Куда писать (подтемы)", callback_data=f"m:topic:{chat_id}")
     b.button(text="ℹ️ Помощь", callback_data=f"m:help:{chat_id}")
-    b.button(text="🔄 Сменить группу", callback_data="g:list")
-    b.adjust(2, 2, 1)
+    b.button(text="🔄 Сменить чат", callback_data="g:list")
+    b.adjust(2, 2, 1, 1)
     return b.as_markup()
 
 
@@ -212,6 +229,27 @@ async def dates_menu_kb(chat_id: int) -> tuple[InlineKeyboardMarkup, str]:
     b.adjust(2)
     return b.as_markup(), "📅 Выберите дату:"
 
+async def topics_menu_kb(chat_id: int) -> InlineKeyboardMarkup:
+    topics = await db.get_topics(chat_id)
+    current = await db.get_chat_thread(chat_id)
+
+    b = InlineKeyboardBuilder()
+    # «Основная» (General) — thread_id отсутствует
+    mark = "✅" if current is None else "⬜"
+    b.button(
+        text=_safe_button_text(f"{mark} 📌 Основная тема"),
+        callback_data=f"t:set:{chat_id}:0",
+    )
+    for tid, name in topics:
+        mark = "✅" if current == tid else "⬜"
+        b.button(
+            text=_safe_button_text(f"{mark} {name}"),
+            callback_data=_safe_callback(f"t:set:{chat_id}:{tid}"),
+        )
+    b.button(text="⬅️ Назад", callback_data=f"m:main:{chat_id}")
+    b.adjust(1)
+    return b.as_markup()
+
 
 def help_text() -> str:
     return (
@@ -232,37 +270,43 @@ def help_text() -> str:
 @dp.my_chat_member()
 async def on_bot_added_to_chat(update: ChatMemberUpdated):
     chat = update.chat
-    if chat.type not in ("group", "supergroup"):
+    if chat.type not in ("group", "supergroup", "channel"):
         return
 
     old_status = update.old_chat_member.status
     new_status = update.new_chat_member.status
 
     if new_status in ("member", "administrator") and old_status in ("left", "kicked"):
-        await db.upsert_chat(chat.id, chat.title or "Группа")
+        kind = chat.type
+        await db.upsert_chat(chat.id, chat.title or "Без названия")
+        log.info("Бот добавлен в %s (%s, %s)", chat.title, chat.id, kind)
 
-        # Кнопка ведёт в личку с ботом, в deep-link передаём chat_id
-        url = f"https://t.me/{BOT_USERNAME}?start=g_{chat.id}"
-        b = InlineKeyboardBuilder()
-        b.button(text="⚙️ Настроить", url=url)
+        deep_link = f"https://t.me/{BOT_USERNAME}?start=g_{chat.id}"
 
-        try:
-            await bot.send_message(
-                chat.id,
-                f"🕯 <b>NoLightToday</b> подключён к группе "
-                f"<b>{chat.title or 'без названия'}</b>.\n\n"
-                f"Настройки — в личке с ботом. Нажмите кнопку ниже.",
-                reply_markup=b.as_markup(),
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            log.warning("Не удалось отправить приветствие в %s: %s", chat.id, e)
+        adder_id = update.from_user.id if update.from_user else None
+        if adder_id is not None:
+            b = InlineKeyboardBuilder()
+            b.button(text="⚙️ Настроить", url=deep_link)
+            label = "канал" if kind == "channel" else "группу"
+            try:
+                await bot.send_message(
+                    adder_id,
+                    f"🕯 <b>NoLightToday</b> добавлен в {label} "
+                    f"<b>{chat.title or 'без названия'}</b>.\n\n"
+                    f"Настройки — здесь, в личке.",
+                    reply_markup=b.as_markup(),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                log.info("Не смог написать в личку %s: %s", adder_id, e)
 
         for admin_id in ADMIN_IDS:
+            if admin_id == adder_id:
+                continue
             try:
                 await bot.send_message(
                     admin_id,
-                    f"🕯 Бот добавлен в группу <b>{chat.title}</b>\n"
+                    f"🕯 Бот добавлен в <b>{chat.title}</b>\n"
                     f"chat_id: <code>{chat.id}</code>",
                     parse_mode="HTML",
                 )
@@ -271,7 +315,33 @@ async def on_bot_added_to_chat(update: ChatMemberUpdated):
 
     elif new_status in ("left", "kicked"):
         await db.delete_chat(chat.id)
-        log.info("Бот удалён из группы %s (%s)", chat.title, chat.id)
+        log.info("Бот удалён из чата %s (%s)", chat.title, chat.id)
+
+
+@dp.message(F.forum_topic_created)
+async def on_topic_created(message: Message):
+    """Ловит создание темы в форуме и запоминает её."""
+    if message.chat.type not in ("group", "supergroup"):
+        return
+    if message.forum_topic_created is None or message.message_thread_id is None:
+        return
+    await db.upsert_topic(
+        message.chat.id,
+        message.message_thread_id,
+        message.forum_topic_created.name,
+    )
+    log.info("Тема создана: %s в %s", message.forum_topic_created.name, message.chat.id)
+
+
+@dp.message(F.forum_topic_edited)
+async def on_topic_edited(message: Message):
+    """Ловит переименование темы."""
+    if message.chat.type not in ("group", "supergroup"):
+        return
+    if message.forum_topic_edited is None or message.message_thread_id is None:
+        return
+    new_name = message.forum_topic_edited.name or "без названия"
+    await db.upsert_topic(message.chat.id, message.message_thread_id, new_name)
 
 
 # =========================================================
@@ -283,7 +353,7 @@ async def cmd_start(message: Message, command: CommandObject):
     chat = message.chat
 
     # В группе — молчим (приветствие уже ушло при добавлении)
-    if chat.type in ("group", "supergroup"):
+    if chat.type != "private":
         return
 
     # В личке — показываем список групп
@@ -600,6 +670,47 @@ async def cb_date_show(cb: CallbackQuery):
     b.button(text="⬅️ Назад", callback_data=f"m:dates:{chat_id}")
     await safe_edit_message(cb, text, reply_markup=b.as_markup())
 
+# ---------- Раздел «Куда писать» (тема форума) ----------
+
+@dp.callback_query(F.data.startswith("m:topic:"))
+async def cb_topic_menu(cb: CallbackQuery):
+    chat_id = int(cb.data.rsplit(":", 1)[1])
+    if not await _guard(cb, chat_id):
+        return
+    await cb.answer()
+
+    kind = await chat_kind(chat_id)
+    if kind not in ("group", "supergroup"):
+        await safe_edit_message(
+            cb,
+            "ℹ️ Выбор темы доступен только в форумах (супергруппах с темами).",
+            reply_markup=back_to_main_kb(chat_id),
+        )
+        return
+
+    kb = await topics_menu_kb(chat_id)
+    await safe_edit_message(
+        cb,
+        "🎯 <b>Куда писать уведомления</b>\n\n"
+        "Выберите тему форума. Если бот её не видит — создайте тему при боте, "
+        "он её запомнит.",
+        reply_markup=kb,
+    )
+
+
+@dp.callback_query(F.data.startswith("t:set:"))
+async def cb_topic_set(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    chat_id = int(parts[2])
+    thread_id = int(parts[3]) or None   # 0 → None
+    if not await _guard(cb, chat_id):
+        return
+    await cb.answer("Сохранено")
+
+    await db.set_chat_thread(chat_id, thread_id)
+
+    kb = await topics_menu_kb(chat_id)
+    await safe_edit_markup(cb, kb)
 
 # =========================================================
 #                ВВОД НАЗВАНИЯ НП (в личке)
