@@ -21,7 +21,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import db
 from config import ADMIN_IDS, BOT_USERNAME, BOT_TOKEN, LOCALITIES
 from filters import is_admin, require_admin_callback
-from scheduler import format_outage, matches_locality, scheduler
+from scheduler import format_outage, matches_locality, notify_all, scheduler
+from parser import parse_outages
 
 
 # =========================================================
@@ -724,6 +725,35 @@ async def cb_topic_set(cb: CallbackQuery):
 # =========================================================
 #                ВВОД НАЗВАНИЯ НП (в личке)
 # =========================================================
+async def _check_locality_now(chat_id: int, locality: str) -> tuple[int, list[str]]:
+    """Парсит сайт по одному НП и обновляет кэш.
+
+    Возвращает (количество_записей, отсортированные_даты).
+    Если парсинг упал — вернёт (-1, []).
+    """
+    try:
+        records = parse_outages(street=locality, max_pages=2)
+    except Exception as e:
+        log.warning("parse_outages('%s') упал: %s", locality, e)
+        return -1, []
+
+    if not records:
+        return 0, []
+
+    try:
+        await db.save_cache(records)
+    except Exception as e:
+        log.warning("save_cache упал: %s", e)
+
+    # Сразу рассылаем уведомления всем подписанным
+    try:
+        await notify_all(bot, records)
+    except Exception as e:
+        log.warning("notify_all после проверки упал: %s", e)
+
+    dates = sorted({r["date_key"] for r in records})
+    return len(records), dates
+
 
 @dp.message(F.text, ~F.text.startswith("/"))
 async def fallback_text(message: Message):
@@ -757,28 +787,48 @@ async def fallback_text(message: Message):
         await message.answer("Слишком длинное название (максимум 100 символов).")
         return
 
-    # Проверяем, есть ли совпадения в кэше
-    all_dates = await db.get_available_dates()
-    has_any = False
-    for d in all_dates:
-        cached = await db.get_cache_by_date(d)
-        if any(matches_locality(o, text) for o in cached):
-            has_any = True
-            break
-
+    # Добавляем подписку
     await db.toggle_subscription(chat_id, text)
+
+    # Сразу проверяем — есть ли что-то на сайте по этому НП
+    info = await message.answer(f"🔍 Проверяю сайт по «{text}»…")
+
+    try:
+        count, dates = await _check_locality_now(chat_id, text)
+    except Exception as e:
+        log.warning("Автопроверка '%s' упала: %s", text, e)
+        count, dates = -1, []
+
+    # Убираем «Проверяю…»
+    try:
+        await info.delete()
+    except Exception:
+        pass
+
+    # Формируем итог
+    if count > 0:
+        dates_str = ", ".join(d.replace("-", ".") for d in dates[:5])
+        if len(dates) > 5:
+            dates_str += "…"
+        hint = (
+            f"✅ Найдено <b>{count}</b> записей на даты: {dates_str}\n"
+            f"Уведомления уже отправлены в чат."
+        )
+    elif count == 0:
+        hint = (
+            "⚠️ На сайте пока нет отключений по этому НП. "
+            "Если появятся — бот пришлёт уведомление при следующей проверке."
+        )
+    else:
+        hint = (
+            "⚠️ Не удалось получить данные с сайта. "
+            "Подписка сохранена, проверка будет в следующий цикл."
+        )
+
     kb = await subs_menu_kb(chat_id)
-
-    hint = (
-        "✅ Совпадения в текущем кэше найдены — уведомления будут приходить."
-        if has_any
-        else "⚠️ В текущем кэше совпадений пока нет. "
-             "Если это ожидаемо — всё в порядке."
-    )
-
     await message.answer(
         f"✅ Добавлено: <b>{text}</b>\n{hint}\n\n"
-        f"⚙️ <b>Подписки</b>\nОтметьте НП (можно несколько) или добавьте свой:",
+        f"⚙️ <b>Подписки</b> — отметьте НП или добавьте свой:",
         reply_markup=kb,
         parse_mode="HTML",
     )
