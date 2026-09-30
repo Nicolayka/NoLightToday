@@ -4,6 +4,7 @@
 #
 # Использование (от root):
 #     sudo bash scripts/install.sh
+#     sudo -E PYTHON_BIN=python3.11 bash scripts/install.sh
 #
 # Идемпотентно: можно запускать повторно после git pull.
 #
@@ -41,35 +42,108 @@ if [ ! -f "${SRC_DIR}/pyproject.toml" ]; then
 fi
 
 
+# =========================================================
+#           ВЫБОР PYTHON
+# =========================================================
+#
+# Проект зависит от aiohttp, pydantic-core и других пакетов с C/Rust
+# расширениями. Для Python 3.11/3.12 есть готовые бинарные wheels,
+# для 3.13/3.14 их пока нет — pip пытается собирать из исходников
+# и падает. Поэтому требуем 3.11 или 3.12.
+
+SUPPORTED_MINORS=("3.11" "3.12")
+
+_is_supported() {
+    local ver="$1"
+    for m in "${SUPPORTED_MINORS[@]}"; do
+        [ "${ver}" = "${m}" ] && return 0
+    done
+    return 1
+}
+
+_get_minor() {
+    "$1" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null
+}
+
+
+# 1. Если PYTHON_BIN задан снаружи — уважаем выбор
+if [ -n "${PYTHON_BIN:-}" ] && command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    PY_VER="$(_get_minor "${PYTHON_BIN}")"
+    if ! _is_supported "${PY_VER}"; then
+        err "Указанный PYTHON_BIN=${PYTHON_BIN} имеет версию ${PY_VER}."
+        err "Поддерживаются только: ${SUPPORTED_MINORS[*]}"
+        exit 1
+    fi
+    log "Использую Python из PYTHON_BIN: ${PYTHON_BIN} (${PY_VER})"
+
+else
+    # 2. Ищем подходящий Python сами
+    PYTHON_BIN=""
+    for candidate in python3.12 python3.11; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            ver="$(_get_minor "${candidate}")"
+            if _is_supported "${ver}"; then
+                PYTHON_BIN="${candidate}"
+                log "Найден подходящий Python: ${PYTHON_BIN} (${ver})"
+                break
+            fi
+        fi
+    done
+
+    # 3. Ничего не нашли — ставим python3.11 из apt
+    if [ -z "${PYTHON_BIN}" ]; then
+        warn "Подходящий Python (3.11/3.12) не найден. Пробую поставить python3.11..."
+
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            python3.11 python3.11-venv python3.11-dev \
+        || {
+            err "Не удалось установить python3.11."
+            err "Проверьте apt (возможно, сломан из-за сторонних репозиториев):"
+            err "    apt --fix-broken install"
+            err "или установите вручную:"
+            err "    apt install python3.11 python3.11-venv python3.11-dev"
+            exit 1
+        }
+
+        if command -v python3.11 >/dev/null 2>&1; then
+            PYTHON_BIN="python3.11"
+            log "Установлен и выбран ${PYTHON_BIN}"
+        else
+            err "python3.11 не появился после установки. Разберитесь с apt."
+            exit 1
+        fi
+    fi
+fi
+
+PY_VERSION="$(_get_minor "${PYTHON_BIN}")"
+log "Итоговый Python: ${PYTHON_BIN} (${PY_VERSION})"
+
+
 # ---------- системные пакеты ----------
 log "Проверяю системные пакеты..."
 
-REQUIRED_PKGS=(python3 python3-venv python3-pip ca-certificates)
-MISSING_PKGS=()
-for pkg in "${REQUIRED_PKGS[@]}"; do
+# Проверяем, что venv-модуль для выбранного Python доступен
+if ! "${PYTHON_BIN}" -c "import venv" >/dev/null 2>&1; then
+    log "Ставлю ${PYTHON_BIN}-venv..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${PYTHON_BIN}-venv" || {
+        err "Не удалось поставить ${PYTHON_BIN}-venv."
+        err "Проверьте: apt --fix-broken install"
+        exit 1
+    }
+fi
+
+# ca-certificates нужен для SSL к сайту Россети и к Telegram
+for pkg in ca-certificates; do
     if ! dpkg -s "${pkg}" >/dev/null 2>&1; then
-        MISSING_PKGS+=("${pkg}")
+        log "Ставлю ${pkg}..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkg}" || {
+            err "Не удалось поставить ${pkg}."
+            exit 1
+        }
     fi
 done
 
-if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-    log "Ставлю недостающие пакеты: ${MISSING_PKGS[*]}"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${MISSING_PKGS[@]}" || {
-        err "Не удалось поставить пакеты. Проверьте apt: apt --fix-broken install"
-        exit 1
-    }
-else
-    log "Все необходимые пакеты уже установлены."
-fi
-
-
-# ---------- проверка venv ----------
-# Проверяем, что python3 -m venv реально работает (бывает, что пакет есть,
-# но pip внутри не создаётся)
-if ! python3 -c "import venv" >/dev/null 2>&1; then
-    err "Модуль venv не работает. Установите python3-venv и попробуйте снова."
-    exit 1
-fi
+log "Все необходимые пакеты на месте."
 
 
 # ---------- пользователь ----------
@@ -106,9 +180,19 @@ mkdir -p "${DATA_DIR}" "${APP_DIR}/logs"
 
 
 # ---------- venv ----------
+# Если venv уже существует, но от другой версии Python — пересоздаём
+if [ -x "${APP_DIR}/.venv/bin/python" ]; then
+    VENV_VER="$(_get_minor "${APP_DIR}/.venv/bin/python")"
+    if [ "${VENV_VER}" != "${PY_VERSION}" ]; then
+        warn "Существующий venv использует Python ${VENV_VER}, нужен ${PY_VERSION}."
+        warn "Пересоздаю venv..."
+        rm -rf "${APP_DIR}/.venv"
+    fi
+fi
+
 if [ ! -x "${APP_DIR}/.venv/bin/python" ]; then
-    log "Создаю виртуальное окружение..."
-    python3 -m venv "${APP_DIR}/.venv"
+    log "Создаю виртуальное окружение (${PYTHON_BIN})..."
+    "${PYTHON_BIN}" -m venv "${APP_DIR}/.venv"
 fi
 
 log "Обновляю pip и ставлю зависимости..."
@@ -177,7 +261,7 @@ systemctl --no-pager --full status "${APP_NAME}" || true
 
 # ---------- итог ----------
 echo
-log "Установка завершена."
+log "Установка завершена. Использован Python ${PY_VERSION}."
 echo
 echo "Файлы:"
 echo "  Приложение:   ${APP_DIR}"

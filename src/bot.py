@@ -39,7 +39,16 @@ log = logging.getLogger("nolighttoday")
 #                          БОТ
 # =========================================================
 
-bot = Bot(token=BOT_TOKEN)
+import socket
+
+from aiogram.client.session.aiohttp import AiohttpSession
+
+# Форсируем IPv4: некоторые хостеры не дают работать IPv6,
+# и aiohttp зависает на нём до полного таймаута.
+_session = AiohttpSession()
+_session._connector_init = {"family": socket.AF_INET}
+
+bot = Bot(token=BOT_TOKEN, session=_session)
 dp = Dispatcher()
 
 
