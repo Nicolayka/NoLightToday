@@ -9,6 +9,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![aiogram](https://img.shields.io/badge/aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)](https://docs.aiogram.dev/)
 [![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-4B8BBE)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 *«No light today» — сегодня света нет. Но вы узнаете об этом заранее.*
@@ -19,11 +20,13 @@
 
 ## 📖 О проекте
 
-**NoLightToday** — Telegram-бот на Python, который периодически проверяет
-[страницу плановых работ](https://rosseti-lenenergo.ru/planned_work/)
+**NoLightToday** — небольшой Telegram-бот на Python, который периодически
+проверяет [страницу плановых работ](https://rosseti-lenenergo.ru/planned_work/)
 Россети Ленэнерго, сравнивает свежие записи с вашими подписками и присылает
-уведомления в групповой чат. Управление — через удобное меню с кнопками,
-доступное только администраторам.
+уведомления в групповой чат.
+
+Управление — через удобное меню с кнопками, доступное только администраторам
+группы. Работает на Linux, macOS и Windows.
 
 Проект рассчитан на жителей Санкт-Петербурга и Ленинградской области,
 которым важно заранее знать о предстоящих отключениях света.
@@ -37,10 +40,11 @@
 | 🔔 **Уведомления в группу** | Как только на сайте появляется новая запись по отслеживаемому НП, бот пишет об этом в чат. |
 | ⚙️ **Мультивыбор НП** | Можно подписаться сразу на несколько населённых пунктов. |
 | 🏆 **Приоритеты** | Если на одну дату приходится несколько отключений в разных НП, приходит **одно** уведомление — по «главному» НП. Остальные доступны в разделе «📅 Отключения». |
-| 📅 **Просмотр по датам** | Список всех отключений по вашим НП на конкретный день — прямо в боте, без повторного обращения к сайту (данные кэшируются в БД). |
+| 📅 **Просмотр по датам** | Список всех отключений по вашим НП на конкретный день — прямо в боте, без повторного обращения к сайту (данные кэшируются). |
 | 🔒 **Только для администраторов** | Все настройки доступны пользователям из белого списка ID. Остальные получают только уведомления. |
-| 💾 **Файловая БД** | Всё хранится в одном файле `bot_data.db` — легко бэкапить и переносить. |
+| 💾 **Файловая БД** | Всё хранится в одном файле `data/bot_data.db` — легко бэкапить и переносить. |
 | 🎛 **Только кнопки** | Никаких слеш-команд — всё через reply-кнопку «📋 Меню» и inline-навигацию. |
+| 🖥 **Кроссплатформенность** | Linux, macOS и Windows. Скрипты запуска для всех трёх систем. |
 
 ---
 
@@ -48,41 +52,39 @@
 
 ```
 ┌──────────────────────────┐       ┌──────────────────────────┐
-│  rosseti-lenenergo.ru    │       │  Telegram группа          │
-│  /planned_work/          │       │  (получатели)             │
+│  rosseti-lenenergo.ru    │       │  Telegram группа         │
+│  /planned_work/          │       │  (получатели)            │
 └────────────┬─────────────┘       └────────────┬─────────────┘
-             │                                  ▲
              │ HTTP GET + парсинг               │ сообщение
              │ (requests + BeautifulSoup)       │
              ▼                                  │
       ┌──────────────┐                  ┌───────┴─────────┐
-      │   parser.py  │───list[dict]────▶│  scheduler.py   │
+      │  parser.py   │───list[dict]────▶│  scheduler.py   │
       └──────────────┘                  │  (раз в час)    │
                                         └───────┬─────────┘
                                                 │
                               ┌─────────────────┴──────────────────┐
                               ▼                                    ▼
                       ┌───────────────┐                   ┌────────────────┐
-                      │  bot_data.db  │◀────чтение────────│    bot.py      │
+                      │ bot_data.db   │◀────чтение────────│    bot.py      │
                       │  (SQLite)     │─────запись───────▶│  (aiogram 3)   │
-                      │               │                   │  меню/кнопки   │
                       └───────────────┘                   └────────────────┘
 ```
 
 ---
 
-## 🗓️ График проверок (расписание работы)
+## 🗓️ График проверок
 
 По умолчанию бот проверяет сайт **раз в час**, 24/7. При старте запускается
 немедленная проверка, чтобы не ждать первого интервала.
 
-| Событие                     | Когда выполняется                          |
-|-----------------------------|--------------------------------------------|
-| Первая проверка сайта       | Сразу после запуска бота                   |
-| Последующие проверки        | Каждые `CHECK_INTERVAL` секунд (по умолч. 3600 = 1 час) |
-| Отправка уведомления в чат  | В момент обнаружения новой записи          |
-| Обновление кэша `outage_cache` | На каждой проверке (данные перезаписываются) |
-| Пометка «уже отправлено»    | Сразу после успешной отправки сообщения    |
+| Событие | Когда выполняется |
+|---|---|
+| Первая проверка сайта | Сразу после запуска бота |
+| Последующие проверки | Каждые `CHECK_INTERVAL` секунд (по умолчанию 3600) |
+| Отправка уведомления в чат | В момент обнаружения новой записи |
+| Обновление кэша `outage_cache` | На каждой проверке |
+| Пометка «уже отправлено» | Сразу после успешной отправки сообщения |
 
 ### Типичная суточная активность
 
@@ -97,12 +99,12 @@
 23:00 ─── ●
 ```
 
-Интервал легко поменять в `config.py`:
+Интервал легко поменять в `src/config.py` или через `.env`:
 
-```python
-CHECK_INTERVAL = 3600     # 1 час
-# CHECK_INTERVAL = 1800   # 30 минут
-# CHECK_INTERVAL = 7200   # 2 часа
+```dotenv
+CHECK_INTERVAL=1800    # 30 минут
+CHECK_INTERVAL=3600    # 1 час (по умолчанию)
+CHECK_INTERVAL=7200    # 2 часа
 ```
 
 > ⚠️ Не рекомендуется ставить интервал меньше 30 минут — это создаёт
@@ -111,81 +113,146 @@ CHECK_INTERVAL = 3600     # 1 час
 
 ---
 
-## 🏗️ Архитектура и файлы
+## 🏗️ Структура проекта
 
 ```
-rosseti_bot/
-├── bot.py             # точка входа, хендлеры, меню, клавиатуры
-├── config.py          # токен, ID админов, список НП, интервалы
-├── db.py              # работа с SQLite (файл bot_data.db)
-├── parser.py          # парсинг сайта Россети
-├── scheduler.py       # фоновая проверка + логика уведомлений
-├── filters.py         # проверка «админ ли пользователь»
-├── requirements.txt   # зависимости
-├── bot_data.db        # создастся автоматически при первом запуске
-└── README.md
+nolighttoday/
+├── src/                     # исходники (плоский src-layout)
+│   ├── __init__.py
+│   ├── __main__.py          # точка входа: python -m src
+│   ├── bot.py               # хендлеры, меню, клавиатуры
+│   ├── config.py            # токен, админы, НП, интервалы
+│   ├── db.py                # работа с SQLite
+│   ├── parser.py            # парсинг сайта Россети
+│   ├── scheduler.py         # фоновая проверка и уведомления
+│   └── filters.py           # проверка «админ ли пользователь»
+├── tests/
+│   └── test_parser.py
+├── data/                    # сюда пишется bot_data.db
+│   └── .gitkeep
+├── scripts/
+│   ├── run.sh               # запуск на Linux/macOS
+│   ├── run.bat              # запуск на Windows (cmd)
+│   ├── run.ps1              # запуск на Windows (PowerShell)
+│   ├── install.bat          # установка на Windows (cmd)
+│   └── install.ps1          # установка на Windows (PowerShell)
+├── .env.example
+├── .gitattributes           # LF/CRLF для разных ОС
+├── .gitignore
+├── LICENSE
+├── README.md
+├── pyproject.toml
+└── requirements.txt
 ```
 
 ---
 
-## 🚀 Установка
+## 🚀 Быстрый старт
 
-### 1. Клонирование
+### Общие шаги (все ОС)
 
-```bash
-git clone https://github.com/<ваш_ник>/NoLightToday.git
-cd NoLightToday
-```
+1. **Получите токен бота** у [@BotFather](https://t.me/BotFather) — команда `/newbot`.
+2. **Узнайте свой Telegram ID** у [@userinfobot](https://t.me/userinfobot).
+3. **Склонируйте репозиторий** и перейдите в него:
 
-### 2. Виртуальное окружение
+   ```bash
+   git clone https://github.com/<ваш_ник>/nolighttoday.git
+   cd nolighttoday
+   ```
 
-```bash
-python -m venv .venv
-source .venv/bin/activate       # Linux/macOS
-# .venv\Scripts\activate        # Windows
-```
+4. **Создайте `.env`** из шаблона и заполните:
 
-### 3. Зависимости
+   ```dotenv
+   BOT_TOKEN=123456789:AA...ваш_токен
+   ADMIN_IDS=123456789
+   CHECK_INTERVAL=3600
+   ```
 
-```bash
-pip install -r requirements.txt
-```
+5. **Установите зависимости и запустите** — по инструкции для вашей ОС ниже.
 
-### 4. Настройка `config.py`
+---
 
-```python
-BOT_TOKEN = "ТОКЕН_ОТ_@BotFather"
-
-ADMIN_IDS = {
-    123456789,   # ваш личный ID (узнать: @userinfobot)
-    987654321,   # при желании — второй админ
-}
-
-LOCALITIES = [
-    "Санкт-Петербург",
-    "Всеволожск",
-    "Гатчина",
-    "Выборг",
-    "Тихвин",
-    "Кириши",
-    "Сосновый Бор",
-    "Луга",
-]
-
-CHECK_INTERVAL = 3600     # период проверки сайта, сек
-MAX_PAGES = 15            # сколько страниц пагинации обходить
-```
-
-### 5. Запуск
+### 🐧 Linux / 🍎 macOS
 
 ```bash
-python bot.py
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -e ".[dev]"
+
+python -m src
 ```
 
-При первом старте:
-- создастся файл `bot_data.db` с нужными таблицами,
-- запустится первая проверка сайта,
-- бот начнёт принимать сообщения.
+Или через удобный скрипт:
+
+```bash
+chmod +x scripts/run.sh
+./scripts/run.sh
+```
+
+---
+
+### 🪟 Windows
+
+#### Шаг 1. Установите Python
+
+Скачайте **Python 3.11+** с [python.org](https://www.python.org/downloads/windows/).
+При установке обязательно отметьте:
+
+- ✅ **Add python.exe to PATH**
+- ✅ **Install launcher for all users**
+
+#### Шаг 2. Установите Git (опционально)
+
+Если хотите клонировать репозиторий, а не скачивать ZIP —
+установите [Git for Windows](https://git-scm.com/download/win).
+
+#### Шаг 3. Скачайте проект
+
+```cmd
+git clone https://github.com/<ваш_ник>/nolighttoday.git
+cd nolighttoday
+```
+
+Или просто распакуйте ZIP в удобную папку, например `C:\Projects\nolighttoday`.
+
+#### Шаг 4. Настройте `.env`
+
+Скопируйте `.env.example` → `.env` и заполните в Блокноте / VS Code:
+
+```dotenv
+BOT_TOKEN=123456789:AA...ваш_токен
+ADMIN_IDS=123456789
+```
+
+> 💡 Сохраняйте `.env` в кодировке **UTF-8 без BOM**.
+> Notepad++ и VS Code сохраняют правильно по умолчанию.
+
+#### Шаг 5. Установите зависимости
+
+Двойной клик по **`scripts\install.bat`** или из cmd:
+
+```cmd
+scripts\install.bat
+```
+
+#### Шаг 6. Запустите бота
+
+Двойной клик по **`scripts\run.bat`** или из PowerShell:
+
+```powershell
+.\scripts\run.ps1
+```
+
+Если PowerShell блокирует скрипты, разрешите локальные:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+#### Шаг 7. Автозапуск (опционально)
+
+См. раздел [Автозапуск на Windows](#-автозапуск-на-windows) ниже.
 
 ---
 
@@ -196,8 +263,8 @@ python bot.py
 1. Добавьте бота в группу.
 2. Убедитесь, что у него есть право **отправлять сообщения**.
 3. Напишите в группе `/start` — бот покажет приветствие и reply-кнопку «📋 Меню».
-4. **Важно:** добавляйте бота в группу под своим аккаунтом, входящим
-   в `ADMIN_IDS`. Только тогда откроется меню.
+4. **Важно:** добавляйте бота в группу под аккаунтом из `ADMIN_IDS`.
+   Только тогда откроется меню.
 
 ### Карта меню
 
@@ -231,10 +298,11 @@ python bot.py
 ### Логика «главного» НП
 
 Допустим, вы подписаны на **Гатчину** и **Всеволожск**, и у Гатчины приоритет
-выше (в списке `/priority` она сверху). На 15 марта есть отключения в обоих НП.
+выше (в списке «🏆 Приоритет» она сверху). На 15 марта есть отключения в обоих НП.
 
-**Что произойдёт:** бот пришлёт **одно** сообщение — по Гатчине, а во Всеволожске
-отключение будет доступно в разделе **📅 Отключения → 15.03.2026**.
+**Что произойдёт:** бот пришлёт **одно** сообщение — по Гатчине, а про отключение
+во Всеволожске напишет короткой припиской. Полный список по обоим НП доступен
+в разделе **📅 Отключения → 15.03.2026**.
 
 Это защищает чат от спама, когда на один день выпадает сразу много записей.
 
@@ -257,36 +325,39 @@ python bot.py
 
 ## 💾 Работа с базой данных
 
-Все данные — в одном файле `bot_data.db` (SQLite).
+Все данные — в одном файле `data/bot_data.db` (SQLite).
 
 ### Таблицы
 
 **`subscriptions`** — подписки чата на НП:
+
 | id | chat_id | locality | priority |
 |----|---------|----------|----------|
 | 1  | -1001234567890 | Гатчина | 1 |
 | 2  | -1001234567890 | Всеволожск | 2 |
 
 **`sent_notifications`** — что уже отправлено (защита от дублей):
+
 | chat_id | outage_id | sent_at |
 |---------|-----------|---------|
 | -100… | `a1b2c3…` | 2026-03-14 08:00:11 |
 
 **`outage_cache`** — кэш всех спарсенных записей:
+
 | outage_id | date_key | locality | payload (JSON) | fetched_at |
 |---|---|---|---|---|
 
 ### Резервная копия
 
 ```bash
-cp bot_data.db bot_data.db.bak            # простая копия
-sqlite3 bot_data.db ".backup backup.db"   # «горячий» бэкап
+cp data/bot_data.db data/bot_data.db.bak            # простая копия
+sqlite3 data/bot_data.db ".backup backup.db"        # «горячий» бэкап
 ```
 
 ### Просмотр из консоли
 
 ```bash
-sqlite3 bot_data.db
+sqlite3 data/bot_data.db
 sqlite> .tables
 sqlite> SELECT * FROM subscriptions;
 sqlite> .quit
@@ -297,14 +368,15 @@ sqlite> .quit
 Остановите бота и просто удалите файл:
 
 ```bash
-rm bot_data.db
+rm data/bot_data.db          # Linux/macOS
+del data\bot_data.db         # Windows
 ```
 
 При следующем запуске он создастся заново.
 
 ---
 
-## 🐳 Запуск через Docker (опционально)
+## 🐳 Docker (Linux / macOS / Windows с Docker Desktop)
 
 **Dockerfile:**
 
@@ -314,18 +386,20 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-CMD ["python", "bot.py"]
+RUN pip install -e .
+CMD ["python", "-m", "src"]
 ```
 
 **docker-compose.yml:**
 
 ```yaml
 services:
-  NoLightToday:
+  nolighttoday:
     build: .
     restart: unless-stopped
+    env_file: .env
     volumes:
-      - ./bot_data.db:/app/bot_data.db
+      - ./data:/app/data
     environment:
       - TZ=Europe/Moscow
 ```
@@ -339,9 +413,9 @@ docker compose logs -f
 
 ---
 
-## 🖥 Автозапуск на сервере (systemd)
+## 🖥 Автозапуск на Linux (systemd)
 
-Создайте `/etc/systemd/system/NoLightToday.service`:
+Создайте `/etc/systemd/system/nolighttoday.service`:
 
 ```ini
 [Unit]
@@ -350,9 +424,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=NoLightToday
-WorkingDirectory=/opt/NoLightToday
-ExecStart=/opt/NoLightToday/.venv/bin/python /opt/NoLightToday/bot.py
+User=nolighttoday
+WorkingDirectory=/opt/nolighttoday
+EnvironmentFile=/opt/nolighttoday/.env
+ExecStart=/opt/nolighttoday/.venv/bin/python -m src
 Restart=always
 RestartSec=10
 
@@ -364,10 +439,70 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now NoLightToday
-sudo systemctl status NoLightToday
-journalctl -u NoLightToday -f
+sudo systemctl enable --now nolighttoday
+sudo systemctl status nolighttoday
+journalctl -u nolighttoday -f
 ```
+
+---
+
+## 🪟 Автозапуск на Windows
+
+### Вариант A — Планировщик задач (Task Scheduler)
+
+Родной способ, без сторонних программ. Создаём задачу, которая запускает
+бота при входе пользователя.
+
+1. Откройте **Task Scheduler** (`taskschd.msc`).
+2. **Create Task** → вкладка **General**:
+   - Name: `NoLightToday`
+   - ✅ Run with highest privileges
+3. Вкладка **Triggers** → **New…** → **At log on**.
+4. Вкладка **Actions** → **New…**:
+   - Action: `Start a program`
+   - Program/script: `C:\путь\до\nolighttoday\scripts\run.bat`
+   - Start in: `C:\путь\до\nolighttoday`
+5. Вкладка **Settings**:
+   - ✅ If the task fails, restart every **1 minute**, up to **3** times.
+   - ❌ Stop the task if it runs longer than… *(снять галочку — бот работает постоянно)*.
+6. **OK**.
+
+Проверить из командной строки:
+
+```cmd
+schtasks /Run /TN "NoLightToday"
+```
+
+### Вариант B — NSSM (служба Windows)
+
+Превращает bat в настоящую службу Windows. Скачайте
+[NSSM](https://nssm.cc/download), распакуйте `nssm.exe` в `C:\Tools\nssm\`.
+
+В **cmd от имени администратора**:
+
+```cmd
+C:\Tools\nssm\nssm.exe install NoLightToday "C:\путь\до\nolighttoday\.venv\Scripts\python.exe" "-m src"
+C:\Tools\nssm\nssm.exe set NoLightToday AppDirectory "C:\путь\до\nolighttoday"
+C:\Tools\nssm\nssm.exe set NoLightToday AppStdout "C:\путь\до\nolighttoday\logs\stdout.log"
+C:\Tools\nssm\nssm.exe set NoLightToday AppStderr "C:\путь\до\nolighttoday\logs\stderr.log"
+C:\Tools\nssm\nssm.exe set NoLightToday AppEnvironmentExtra "PYTHONIOENCODING=utf-8" "PYTHONUTF8=1"
+C:\Tools\nssm\nssm.exe set NoLightToday Start SERVICE_AUTO_START
+C:\Tools\nssm\nssm.exe start NoLightToday
+```
+
+Управление:
+
+```cmd
+nssm.exe status  NoLightToday
+nssm.exe restart NoLightToday
+nssm.exe stop    NoLightToday
+nssm.exe remove  NoLightToday confirm
+```
+
+### Вариант C — Docker Desktop
+
+Если стоит Docker Desktop с WSL2 — используйте тот же `docker-compose.yml`,
+что и на Linux.
 
 ---
 
@@ -375,20 +510,22 @@ journalctl -u NoLightToday -f
 
 ### Свой список населённых пунктов
 
-Отредактируйте `LOCALITIES` в `config.py`. Бот перерисует меню подписок
+Отредактируйте `LOCALITIES` в `src/config.py`. Бот перерисует меню подписок
 по этому списку.
 
 ### Несколько администраторов
 
-```python
-ADMIN_IDS = {111111111, 222222222, 333333333}
+В `.env`:
+
+```dotenv
+ADMIN_IDS=111111111,222222222,333333333
 ```
 
 Любой из списка может управлять ботом из своей группы.
 
 ### Проверка только определённого района
 
-В `parser.py` после парсинга строки можно фильтровать по `region` / `district`:
+В `src/parser.py` после парсинга строки можно фильтровать по `region` / `district`:
 
 ```python
 records = [r for r in records if "Гатчинский" in r["district"]]
@@ -406,14 +543,20 @@ records = [r for r in records if "Гатчинский" in r["district"]]
 Перед первым запуском бота полезно убедиться, что парсер достаёт данные:
 
 ```bash
-python -c "from parser import parse_outages; \
+python -c "from src.parser import parse_outages; \
 import json; \
 data = parse_outages(max_pages=1); \
 print(json.dumps(data[:3], ensure_ascii=False, indent=2))"
 ```
 
-Если вывод пустой — проверьте **индексы колонок** в `parser.py`, открыв HTML
+Если вывод пустой — проверьте **индексы колонок** в `src/parser.py`, открыв HTML
 таблицы на сайте через F12 → Elements.
+
+Запуск юнит-тестов:
+
+```bash
+pytest -q
+```
 
 ---
 
@@ -421,12 +564,18 @@ print(json.dumps(data[:3], ensure_ascii=False, indent=2))"
 
 | Симптом | Причина / решение |
 |---|---|
-| Бот не отвечает на «📋 Меню» | Ваш ID не в `ADMIN_IDS`. Узнайте через @userinfobot. |
-| Парсер возвращает `[]` | Изменилась вёрстка таблицы — поправьте индексы колонок. |
-| `requests` падает с `403` | Смените `User-Agent` в `parser.py`. |
-| Уведомления не приходят | Бот не добавлен в группу или у него нет прав на отправку. Проверьте `SELECT DISTINCT chat_id FROM subscriptions`. |
-| Дубли уведомлений | Проверьте таблицу `sent_notifications` и уникальный индекс. |
-| `/all_...` показывает пусто | Кэш ещё не заполнен — дождитесь первой проверки сайта. |
+| **Бот не отвечает на «📋 Меню»** | Ваш ID не в `ADMIN_IDS`. Узнайте через [@userinfobot](https://t.me/userinfobot). |
+| **Парсер возвращает `[]`** | Изменилась вёрстка таблицы — поправьте индексы колонок в `src/parser.py`. |
+| **`requests` падает с `403`** | Смените `User-Agent` в `src/parser.py`. |
+| **Уведомления не приходят** | Бот не добавлен в группу или у него нет прав на отправку. Проверьте `SELECT DISTINCT chat_id FROM subscriptions`. |
+| **Дубли уведомлений** | Проверьте таблицу `sent_notifications` и уникальный индекс. |
+| **`/all_...` показывает пусто** | Кэш ещё не заполнен — дождитесь первой проверки сайта. |
+| 🪟 **`python не является внутренней командой`** | Python не в PATH. Переустановите с галочкой **Add python.exe to PATH**. |
+| 🪟 **Русские буквы в консоли — «кракозябры»** | Выполните `chcp 65001` перед запуском. В `run.bat` уже включено. |
+| 🪟 **`UnicodeEncodeError: 'charmap' codec`** | Обновите `src/__main__.py` — там принудительный UTF-8. |
+| 🪟 **PowerShell блокирует `run.ps1`** | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
+| 🪟 **Windows Defender блокирует сеть** | Добавьте `.venv\Scripts\python.exe` в исключения. |
+| 🪟 **Файл БД в OneDrive / Dropbox повреждён** | Не храните `bot_data.db` в облачной синхронизации. |
 
 ---
 
@@ -437,6 +586,7 @@ print(json.dumps(data[:3], ensure_ascii=False, indent=2))"
 - [x] Приоритеты НП
 - [x] Кэш отключений в SQLite
 - [x] Ограничение доступа по `ADMIN_IDS`
+- [x] Кроссплатформенность (Linux / macOS / Windows)
 - [ ] Настройка `CHECK_INTERVAL` из меню
 - [ ] Экспорт отключений в CSV / ICS (для календарей)
 - [ ] Поддержка других филиалов Россети (МОЭСК, Кубаньэнерго и т.д.)
@@ -448,13 +598,14 @@ print(json.dumps(data[:3], ensure_ascii=False, indent=2))"
 ## 🤝 Вклад
 
 Pull request'ы приветствуются. Если нашли баг или хотите предложить фичу —
-откройте [Issue](https://github.com/<ваш_ник>/NoLightToday/issues).
+откройте [Issue](https://github.com/<ваш_ник>/nolighttoday/issues).
 
 Перед PR:
 
 ```bash
 pip install ruff
 ruff check .
+pytest -q
 ```
 
 ---
@@ -477,6 +628,6 @@ ruff check .
 
 <div align="center">
 
-Сделано с ⚡ и заботой о тех, кто не любит сидеть без света.
+Сделано с 🕯 для тех, кто не любит сидеть без света.
 
 </div>
