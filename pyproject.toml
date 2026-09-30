@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nolighttoday"
+version = "0.1.0"
+description = "Telegram-бот для мониторинга плановых отключений электроэнергии на сайте Россети Ленэнерго"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Ваше Имя", email = "you@example.com" },
+]
+keywords = ["telegram", "bot", "rosseti", "lenenergo", "outage", "spb", "nolighttoday"]
+dependencies = [
+    "aiogram==3.4.1",
+    "aiosqlite==0.20.0",
+    "requests==2.31.0",
+    "beautifulsoup4==4.12.3",
+]
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest", "pytest-asyncio"]
+
+[project.scripts]
+nolighttoday = "src.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
