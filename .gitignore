@@ -12,10 +12,13 @@ dist/
 .idea/
 .vscode/
 *.swp
+*.swo
 
-# Данные
+# Данные (SQLite)
 data/*.db
 data/*.db.bak
+data/*.db-shm
+data/*.db-wal
 data/*.sqlite*
 !data/.gitkeep
 

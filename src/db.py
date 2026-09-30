@@ -30,6 +30,20 @@ CREATE TABLE IF NOT EXISTS outage_cache (
     fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS chats (
+    chat_id    INTEGER PRIMARY KEY,
+    title      TEXT NOT NULL,
+    added_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS awaiting_input (
+    chat_id    INTEGER PRIMARY KEY,
+    user_id    INTEGER NOT NULL,
+    kind       TEXT NOT NULL,            -- сейчас только 'locality'
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_subs_chat  ON subscriptions(chat_id);
 CREATE INDEX IF NOT EXISTS idx_cache_date ON outage_cache(date_key);
 """
@@ -136,6 +150,14 @@ async def get_all_chats_with_subs() -> list[int]:
             return [r[0] for r in await cur.fetchall()]
 
 
+async def delete_subscription_by_id(chat_id: int, sub_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM subscriptions WHERE chat_id = ? AND id = ?",
+            (chat_id, sub_id),
+        )
+        await db.commit()
+
 # ---------- Уведомления ----------
 
 async def already_sent(chat_id: int, outage_id: str) -> bool:
@@ -160,7 +182,18 @@ async def mark_sent(chat_id: int, outage_id: str) -> None:
 # ---------- Кэш отключений ----------
 
 async def save_cache(records: list[dict]) -> None:
+    if not records:
+        return
+    # Собираем все даты, которые пришли в новой порции
+    dates = {r["date_key"] for r in records}
     async with aiosqlite.connect(DB_PATH) as db:
+        # Удаляем старые записи по этим датам
+        placeholders = ",".join("?" for _ in dates)
+        await db.execute(
+            f"DELETE FROM outage_cache WHERE date_key IN ({placeholders})",
+            tuple(dates),
+        )
+        # Записываем новые
         await db.executemany(
             "INSERT OR REPLACE INTO outage_cache "
             "(outage_id, date_key, locality, payload, fetched_at) "
@@ -199,3 +232,72 @@ async def get_available_dates() -> list[str]:
             return (0, 0, 0)
 
     return sorted(dates, key=key)
+    
+# ---------- Группы ----------
+
+async def upsert_chat(chat_id: int, title: str) -> None:
+    """Сохраняет группу или обновляет её название."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO chats (chat_id, title) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET "
+            "title=excluded.title, updated_at=CURRENT_TIMESTAMP",
+            (chat_id, title),
+        )
+        await db.commit()
+
+
+async def delete_chat(chat_id: int) -> None:
+    """Удаляет группу и её подписки."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+        await db.execute(
+            "DELETE FROM subscriptions WHERE chat_id = ?", (chat_id,)
+        )
+        await db.commit()
+
+
+async def get_all_chats() -> list[tuple[int, str]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT chat_id, title FROM chats ORDER BY title"
+        ) as cur:
+            return [(r[0], r[1]) for r in await cur.fetchall()]
+
+
+async def get_chat_title(chat_id: int) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT title FROM chats WHERE chat_id = ?", (chat_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+            
+# ---------- Ожидание ввода ----------
+
+async def set_awaiting(chat_id: int, user_id: int, kind: str = "locality") -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO awaiting_input (chat_id, user_id, kind) "
+            "VALUES (?, ?, ?)",
+            (chat_id, user_id, kind),
+        )
+        await db.commit()
+
+
+async def get_awaiting(chat_id: int) -> tuple[int, str] | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT user_id, kind FROM awaiting_input WHERE chat_id = ?",
+            (chat_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return (row[0], row[1]) if row else None
+
+
+async def clear_awaiting(chat_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM awaiting_input WHERE chat_id = ?", (chat_id,)
+        )
+        await db.commit()
