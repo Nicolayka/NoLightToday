@@ -19,7 +19,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
-from config import ADMIN_IDS, BOT_USERNAME, BOT_TOKEN, LOCALITIES
+from config import ADMIN_IDS, BOT_USERNAME, BOT_TOKEN, LOCALITIES, TELEGRAM_PROXY
 from filters import is_admin, require_admin_callback
 from scheduler import format_outage, matches_locality, notify_all, scheduler
 from parser import parse_outages
@@ -40,14 +40,16 @@ log = logging.getLogger("nolighttoday")
 #                          БОТ
 # =========================================================
 
-import socket
-
 from aiogram.client.session.aiohttp import AiohttpSession
 
-# Форсируем IPv4: некоторые хостеры не дают работать IPv6,
-# и aiohttp зависает на нём до полного таймаута.
-_session = AiohttpSession()
-_session._connector_init = {"family": socket.AF_INET}
+from config import BOT_TOKEN, TELEGRAM_PROXY
+
+# На RU VPS Telegram блокируется по SNI — идём через прокси.
+# Если TELEGRAM_PROXY пуст — работаем напрямую.
+if TELEGRAM_PROXY:
+    _session = AiohttpSession(proxy=TELEGRAM_PROXY)
+else:
+    _session = AiohttpSession()
 
 bot = Bot(token=BOT_TOKEN, session=_session)
 dp = Dispatcher()
@@ -721,6 +723,33 @@ async def cb_topic_set(cb: CallbackQuery):
 
     kb = await topics_menu_kb(chat_id)
     await safe_edit_markup(cb, kb)
+
+@dp.message(Command("topic"))
+async def cmd_register_topic(message: Message, command: CommandObject):
+    """Сохраняет текущую тему форума под указанным именем.
+
+    Использование: внутри темы отправить
+        /topic Отключения
+    """
+    if message.chat.type not in ("group", "supergroup"):
+        return
+    thread_id = getattr(message, "message_thread_id", None)
+    if not thread_id:
+        await message.answer(
+            "Команда работает только внутри темы форума.",
+            message_thread_id=None,
+        )
+        return
+    name = (command.args or "").strip() or "Без названия"
+    await db.upsert_topic(message.chat.id, thread_id, name)
+    await message.answer(
+        f"✅ Тема зарегистрирована: <b>{name}</b> (thread_id={thread_id})",
+        message_thread_id=thread_id,
+        parse_mode="HTML",
+    )
+    log.info("Тема зарегистрирована вручную: %s (%s) в %s",
+             name, thread_id, message.chat.id)
+
 
 # =========================================================
 #                ВВОД НАЗВАНИЯ НП (в личке)

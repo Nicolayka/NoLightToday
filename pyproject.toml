@@ -14,13 +14,14 @@ authors = [
 ]
 keywords = ["telegram", "bot", "rosseti", "lenenergo", "outage", "spb", "nolighttoday"]
 dependencies = [
-    "aiogram==3.4.1",
-    "aiosqlite==0.20.0",
-    "requests==2.31.0",
-    "beautifulsoup4==4.12.3",
+    "aiogram>=3.15",
+    "aiosqlite>=0.20",
+    "requests>=2.32",
+    "beautifulsoup4>=4.12",
+	"aiohttp-socks>=0.10",
     # Windows: использует системное хранилище сертификатов вместо certifi,
     # решает ошибку SSL CERTIFICATE_VERIFY_FAILED на корпоративных/домашних ПК.
-    "pip-system-certs==5.3; sys_platform == 'win32'",
+    "pip-system-certs; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
