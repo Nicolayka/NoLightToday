@@ -3,30 +3,18 @@
 # NoLightToday — установка на Debian/Ubuntu как systemd-служба.
 #
 # Использование (от root):
-#     sudo bash scripts/install-debian.sh
+#     sudo bash scripts/install.sh
 #
-# Что делает:
-#   1. Устанавливает системные пакеты (python3, venv, git, sqlite3).
-#   2. Создаёт системного пользователя nolighttoday (без логина).
-#   3. Копирует проект в /opt/nolighttoday.
-#   4. Создаёт venv и ставит зависимости.
-#   5. Создаёт /etc/systemd/system/nolighttoday.service.
-#   6. Включает автозапуск и стартует службу.
-#
-# После установки:
-#   - отредактируйте /opt/nolighttoday/.env (токен и админы)
-#   - перезапустите:  sudo systemctl restart nolighttoday
+# Идемпотентно: можно запускать повторно после git pull.
 #
 set -euo pipefail
 
-# ---------- настройки ----------
 APP_NAME="nolighttoday"
 APP_USER="nolighttoday"
 APP_DIR="/opt/${APP_NAME}"
 DATA_DIR="${APP_DIR}/data"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 
-# Директория, откуда запускается скрипт (корень репозитория)
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 
@@ -43,32 +31,48 @@ err()  { echo -e "${C_ERR}[x]${C_OFF} $*" >&2; }
 
 # ---------- проверки ----------
 if [ "$(id -u)" -ne 0 ]; then
-    err "Скрипт нужно запускать от root: sudo bash scripts/install-debian.sh"
+    err "Скрипт нужно запускать от root: sudo bash scripts/install.sh"
     exit 1
 fi
 
 if [ ! -f "${SRC_DIR}/pyproject.toml" ]; then
-    err "Не найден pyproject.toml в ${SRC_DIR}. Запускайте скрипт из корня репозитория."
+    err "Не найден pyproject.toml в ${SRC_DIR}. Запускайте из корня репозитория."
     exit 1
 fi
 
 
-# ---------- установка системных пакетов ----------
-log "Обновляю apt и ставлю зависимости..."
-apt-get update -y
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    python3 \
-    python3-venv \
-    python3-pip \
-    git \
-    sqlite3 \
-    ca-certificates
+# ---------- системные пакеты ----------
+log "Проверяю системные пакеты..."
 
-# Для Python 3.12+ может потребоваться ensurepip
-python3 -m ensurepip --upgrade 2>/dev/null || true
+REQUIRED_PKGS=(python3 python3-venv python3-pip ca-certificates)
+MISSING_PKGS=()
+for pkg in "${REQUIRED_PKGS[@]}"; do
+    if ! dpkg -s "${pkg}" >/dev/null 2>&1; then
+        MISSING_PKGS+=("${pkg}")
+    fi
+done
+
+if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+    log "Ставлю недостающие пакеты: ${MISSING_PKGS[*]}"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${MISSING_PKGS[@]}" || {
+        err "Не удалось поставить пакеты. Проверьте apt: apt --fix-broken install"
+        exit 1
+    }
+else
+    log "Все необходимые пакеты уже установлены."
+fi
 
 
-# ---------- создание пользователя ----------
+# ---------- проверка venv ----------
+# Проверяем, что python3 -m venv реально работает (бывает, что пакет есть,
+# но pip внутри не создаётся)
+if ! python3 -c "import venv" >/dev/null 2>&1; then
+    err "Модуль venv не работает. Установите python3-venv и попробуйте снова."
+    exit 1
+fi
+
+
+# ---------- пользователь ----------
 if id -u "${APP_USER}" >/dev/null 2>&1; then
     log "Пользователь ${APP_USER} уже существует"
 else
@@ -80,21 +84,28 @@ fi
 # ---------- копирование проекта ----------
 log "Копирую проект в ${APP_DIR}..."
 mkdir -p "${APP_DIR}"
-# Копируем содержимое репозитория, исключая уже существующие .venv, data, logs
-rsync -a --delete \
+
+# Чистим каталог, оставляя .venv, data, logs
+find "${APP_DIR}" -mindepth 1 -maxdepth 1 \
+    ! -name '.venv' ! -name 'data' ! -name 'logs' -exec rm -rf {} +
+
+# Копируем через tar — встроен в любую систему, rsync не нужен
+tar \
     --exclude='.git' \
     --exclude='.venv' \
     --exclude='venv' \
     --exclude='__pycache__' \
+    --exclude='*.pyc' \
     --exclude='data/*.db' \
-    --exclude='data/*.db-*' \
+    --exclude='data/*.db-shm' \
+    --exclude='data/*.db-wal' \
     --exclude='logs' \
-    "${SRC_DIR}/" "${APP_DIR}/"
+    -cf - -C "${SRC_DIR}" . | tar -xf - -C "${APP_DIR}"
 
 mkdir -p "${DATA_DIR}" "${APP_DIR}/logs"
 
 
-# ---------- виртуальное окружение ----------
+# ---------- venv ----------
 if [ ! -x "${APP_DIR}/.venv/bin/python" ]; then
     log "Создаю виртуальное окружение..."
     python3 -m venv "${APP_DIR}/.venv"
@@ -115,10 +126,9 @@ if [ ! -f "${APP_DIR}/.env" ]; then
     fi
 fi
 
-# Права на весь каталог — владелец системный пользователь
 chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}"
 chmod 750 "${APP_DIR}"
-chmod 640 "${APP_DIR}/.env" 2>/dev/null || true
+[ -f "${APP_DIR}/.env" ] && chmod 640 "${APP_DIR}/.env"
 
 
 # ---------- systemd unit ----------
@@ -126,7 +136,6 @@ log "Создаю ${SERVICE_FILE}..."
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=NoLightToday — Telegram-бот отключений Россети Ленэнерго
-Documentation=https://github.com/<ваш_ник>/nolighttoday
 After=network-online.target
 Wants=network-online.target
 
@@ -142,14 +151,12 @@ ExecStart=${APP_DIR}/.venv/bin/python -m src
 Restart=always
 RestartSec=10
 
-# Ограничения безопасности
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
 ReadWritePaths=${APP_DIR}
 
-# Логи
 StandardOutput=append:${APP_DIR}/logs/stdout.log
 StandardError=append:${APP_DIR}/logs/stderr.log
 
