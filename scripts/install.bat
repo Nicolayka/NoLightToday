@@ -1,16 +1,52 @@
-$ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+@echo off
+REM ============================================================
+REM  NoLightToday - установка окружения (Windows cmd.exe)
+REM ============================================================
+chcp 65001 >nul
+setlocal
+cd /d "%~dp0.."
 
-$root = Split-Path -Parent $PSScriptRoot
-Set-Location $root
+echo.
+echo [i] Проект: %CD%
+echo.
 
-if (-not (Test-Path ".venv\Scripts\python.exe")) {
+REM Проверяем Python
+where python >nul 2>nul
+if errorlevel 1 (
+    echo [x] Python не найден в PATH.
+    echo     Установите Python 3.10+ с https://www.python.org/downloads/windows/
+    echo     и отметьте галочку "Add python.exe to PATH" при установке.
+    pause
+    exit /b 1
+)
+
+REM Создаём виртуальное окружение
+if not exist ".venv\Scripts\python.exe" (
+    echo [i] Создаю виртуальное окружение .venv ...
     python -m venv .venv
-}
+    if errorlevel 1 (
+        echo [x] Не удалось создать .venv
+        pause
+        exit /b 1
+    )
+)
 
-& ".venv\Scripts\python.exe" -m pip install --upgrade pip
-& ".venv\Scripts\python.exe" -m pip install -e ".[dev]"
+REM Обновляем pip и ставим зависимости
+echo [i] Обновляю pip ...
+".venv\Scripts\python.exe" -m pip install --upgrade pip
 
-Write-Host ""
-Write-Host "[ok] Установка завершена." -ForegroundColor Green
-Write-Host "     Запуск:  .\scripts\run.ps1" -ForegroundColor Cyan
+echo [i] Устанавливаю зависимости проекта ...
+".venv\Scripts\python.exe" -m pip install -e ".[dev]"
+
+if errorlevel 1 (
+    echo [x] Установка завершилась с ошибкой.
+    pause
+    exit /b 1
+)
+
+echo.
+echo [ok] Установка завершена.
+echo      Запуск:  scripts\run.bat
+echo.
+pause
+endlocal

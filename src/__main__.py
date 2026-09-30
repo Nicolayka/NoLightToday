@@ -15,6 +15,24 @@ def _force_utf8() -> None:
                 pass
 
 
+def _enable_system_certs_on_windows() -> None:
+    """На Windows подменяет certifi на системное хранилище сертификатов.
+    Решает ошибку SSLCertVerificationError / CERTIFICATE_VERIFY_FAILED.
+    На Linux/macOS ничего не делает."""
+    if sys.platform != "win32":
+        return
+    try:
+        import pip_system_certs  # noqa: F401
+    except ImportError:
+        print(
+            "[warn] pip-system-certs не установлен. "
+            "Если ловите SSL-ошибки — выполните:\n"
+            "       .venv\\Scripts\\python.exe -m pip install pip-system-certs"
+        )
+
+
+# Порядок важен: сначала SSL, потом UTF-8, потом импорт бота
+_enable_system_certs_on_windows()
 _force_utf8()
 
 from bot import main  # noqa: E402

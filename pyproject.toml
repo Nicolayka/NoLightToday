@@ -18,6 +18,9 @@ dependencies = [
     "aiosqlite==0.20.0",
     "requests==2.31.0",
     "beautifulsoup4==4.12.3",
+    # Windows: использует системное хранилище сертификатов вместо certifi,
+    # решает ошибку SSL CERTIFICATE_VERIFY_FAILED на корпоративных/домашних ПК.
+    "pip-system-certs==5.3; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
