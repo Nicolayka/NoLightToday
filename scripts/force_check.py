@@ -1,8 +1,15 @@
-"""Ручная проверка: тянем данные, сохраняем кэш, шлём уведомления.
+"""Ручной прогон парсера + рассылка уведомлений.
 
 Использование (из корня проекта):
+
+    # Прогнать по всем существующим подпискам (обычный сценарий)
     .venv\\Scripts\\python.exe scripts\\force_check.py
-    .venv\\Scripts\\python.exe scripts\\force_check.py "СНТ Фауна"
+
+    # Прогнать только для одной группы (по её chat_id)
+    .venv\\Scripts\\python.exe scripts\\force_check.py -1004477451907
+
+    # Добавить НП указанной группе и сразу прогнать
+    .venv\\Scripts\\python.exe scripts\\force_check.py -1004477451907 "СНТ Фауна"
 """
 import asyncio
 import sys
@@ -15,19 +22,41 @@ from config import BOT_TOKEN                       # noqa: E402
 from scheduler import fetch_all_outages, notify_all  # noqa: E402
 
 
+def _parse_args():
+    """Возвращает (chat_id | None, locality | None)."""
+    args = sys.argv[1:]
+    if not args:
+        return None, None
+
+    # Первый аргумент — chat_id (число), иначе считаем его названием НП
+    try:
+        chat_id = int(args[0])
+    except ValueError:
+        return None, args[0]
+
+    locality = args[1] if len(args) > 1 else None
+    return chat_id, locality
+
+
 async def main() -> None:
     await db.init_db()
 
-    # Если передан аргумент — добавим его как подписку чату из ADMIN_IDS
-    if len(sys.argv) > 1:
-        from config import ADMIN_IDS
-        if not ADMIN_IDS:
-            print("[force] ADMIN_IDS пуст — не могу добавить временную подписку")
-        else:
-            admin_chat = next(iter(ADMIN_IDS))
-            locality = sys.argv[1]
-            await db.toggle_subscription(admin_chat, locality)
-            print(f"[force] добавлена подписка '{locality}' для chat_id={admin_chat}")
+    chat_id, locality = _parse_args()
+
+    # Если передали chat_id + locality — добавим подписку именно этому чату
+    if chat_id is not None and locality is not None:
+        await db.upsert_chat(chat_id, f"chat {chat_id}")
+        await db.toggle_subscription(chat_id, locality)
+        print(f"[force] добавлена подписка '{locality}' для chat_id={chat_id}")
+
+    # Если передали только chat_id — покажем его текущие подписки
+    if chat_id is not None:
+        subs = await db.get_subscriptions(chat_id)
+        if not subs:
+            print(f"[force] у чата {chat_id} нет подписок — нечего собирать")
+            return
+        print(f"[force] подписки чата {chat_id}: "
+              f"{', '.join(loc for loc, _ in subs)}")
 
     print("[force] собираю данные с сайта ...")
     outages = await fetch_all_outages()
