@@ -1,20 +1,23 @@
-"""NoLightToday — Telegram-бот для мониторинга отключений электроэнергии."""
+"""NoLightToday — Telegram-бот для мониторинга отключений электроэнергии.
+
+В группе бот только получает уведомления.
+Все настройки — в личке с ботом, с выбором группы.
+"""
 import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
     InlineKeyboardMarkup,
     Message,
-    ReplyKeyboardMarkup,
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
-from config import ADMIN_IDS, BOT_TOKEN, LOCALITIES
+from config import ADMIN_IDS, BOT_USERNAME, BOT_TOKEN, LOCALITIES
 from filters import is_admin, require_admin_callback
 from scheduler import format_outage, matches_locality, scheduler
 
@@ -43,120 +46,90 @@ dp = Dispatcher()
 # =========================================================
 
 def _safe_button_text(text: str, limit: int = 60) -> str:
-    """Обрезает текст кнопки до лимита Telegram (64 символа)."""
     text = text.strip()
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _safe_callback(data: str) -> str:
-    """Проверяет, что callback_data укладывается в 64 байта Telegram."""
     b = data.encode("utf-8")
     if len(b) > 64:
         data = b[:64].decode("utf-8", errors="ignore")
     return data
 
 
-def _chat_id_from_cb(cb: CallbackQuery) -> int:
-    """Возвращает chat_id из callback'а даже для InaccessibleMessage."""
-    if cb.message is not None:
-        return cb.message.chat.id
-    return cb.from_user.id
-
-
-async def safe_edit_message(
-    cb: CallbackQuery,
-    text: str,
-    reply_markup=None,
-    parse_mode: str | None = "HTML",
-) -> None:
-    """Безопасно редактирует сообщение callback'а.
-
-    Если сообщение недоступно (слишком старое) — отправляет новое в тот же чат.
-    """
+async def safe_edit_message(cb: CallbackQuery, text: str, reply_markup=None) -> None:
+    """Редактирует сообщение callback'а; при неудаче — отправляет новое."""
     try:
-        await cb.message.edit_text(
-            text, reply_markup=reply_markup, parse_mode=parse_mode
-        )
+        await cb.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
     except Exception as e:
-        log.debug("edit_text не удался (%s), отправляю новое сообщение", e)
+        log.debug("edit_text не удался (%s), отправляю новое", e)
         try:
             await cb.bot.send_message(
-                chat_id=_chat_id_from_cb(cb),
+                chat_id=cb.from_user.id,
                 text=text,
                 reply_markup=reply_markup,
-                parse_mode=parse_mode,
+                parse_mode="HTML",
             )
         except Exception as e2:
-            log.warning("Не удалось отправить сообщение: %s", e2)
-
-import asyncio as _asyncio
-
-from aiogram.exceptions import TelegramRetryAfter
-
-
-async def safe_send_message(
-    bot: Bot,
-    chat_id: int,
-    text: str,
-    reply_markup=None,
-    parse_mode: str | None = "HTML",
-    retries: int = 3,
-) -> None:
-    """Отправляет сообщение с обработкой TelegramRetryAfter (flood control)."""
-    for attempt in range(retries):
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode,
-            )
-            return
-        except TelegramRetryAfter as e:
-            wait = e.retry_after + 1
-            log.warning(
-                "Flood control: ждём %s сек (попытка %s/%s)",
-                wait, attempt + 1, retries,
-            )
-            await _asyncio.sleep(wait)
-        except Exception as e:
-            log.warning("send_message не удался: %s", e)
-            return
+            log.warning("send_message не удался: %s", e2)
 
 
 async def safe_edit_markup(cb: CallbackQuery, reply_markup) -> None:
-    """Безопасно обновляет клавиатуру сообщения callback'а."""
     try:
         await cb.message.edit_reply_markup(reply_markup=reply_markup)
     except Exception:
-        # Недоступно — ничего страшного, пользователь увидит актуальное
-        # состояние при следующем действии
         pass
+
+
+async def is_group_admin(chat_id: int, user_id: int) -> bool:
+    """Проверяет через Telegram, является ли пользователь админом группы."""
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        return member.status in ("administrator", "creator")
+    except Exception as e:
+        log.debug("get_chat_member(%s, %s): %s", chat_id, user_id, e)
+        return False
+
+
+async def user_admin_groups(user_id: int) -> list[tuple[int, str]]:
+    """Возвращает [(chat_id, title)] — группы, где пользователь админ."""
+    all_chats = await db.get_all_chats()
+    result: list[tuple[int, str]] = []
+    for chat_id, title in all_chats:
+        if await is_group_admin(chat_id, user_id):
+            result.append((chat_id, title))
+    return result
 
 
 # =========================================================
 #                       КЛАВИАТУРЫ
 # =========================================================
 
-def reply_menu_kb() -> ReplyKeyboardMarkup:
-    b = ReplyKeyboardBuilder()
-    b.button(text="📋 Меню")
-    return b.as_markup(resize_keyboard=True)
-
-
-def main_menu_kb() -> InlineKeyboardMarkup:
+def groups_kb(groups: list[tuple[int, str]]) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="⚙️ Подписки", callback_data="menu:subs")
-    b.button(text="🏆 Приоритет", callback_data="menu:prio")
-    b.button(text="📅 Отключения", callback_data="menu:dates")
-    b.button(text="ℹ️ Помощь", callback_data="menu:help")
-    b.adjust(2, 2)
+    for chat_id, title in groups:
+        b.button(
+            text=_safe_button_text(f"📢 {title}"),
+            callback_data=_safe_callback(f"g:{chat_id}"),
+        )
+    b.adjust(1)
     return b.as_markup()
 
 
-def back_to_main_kb() -> InlineKeyboardMarkup:
+def main_menu_kb(chat_id: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="⬅️ Назад", callback_data="menu:main")
+    b.button(text="⚙️ Подписки", callback_data=f"m:subs:{chat_id}")
+    b.button(text="🏆 Приоритет", callback_data=f"m:prio:{chat_id}")
+    b.button(text="📅 Отключения", callback_data=f"m:dates:{chat_id}")
+    b.button(text="ℹ️ Помощь", callback_data=f"m:help:{chat_id}")
+    b.button(text="🔄 Сменить группу", callback_data="g:list")
+    b.adjust(2, 2, 1)
+    return b.as_markup()
+
+
+def back_to_main_kb(chat_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Назад", callback_data=f"m:main:{chat_id}")
     return b.as_markup()
 
 
@@ -165,32 +138,26 @@ async def subs_menu_kb(chat_id: int) -> InlineKeyboardMarkup:
     subs_map = {loc: sid for sid, loc, _ in rows}
 
     b = InlineKeyboardBuilder()
-
-    # 1. Предустановленные НП из config
     for idx, loc in enumerate(LOCALITIES):
         if loc in subs_map:
             b.button(
                 text=_safe_button_text(f"✅ {loc}"),
-                callback_data=_safe_callback(f"subs:rm:{subs_map[loc]}"),
+                callback_data=_safe_callback(f"s:rm:{chat_id}:{subs_map[loc]}"),
             )
         else:
             b.button(
                 text=_safe_button_text(f"⬜ {loc}"),
-                callback_data=_safe_callback(f"subs:add:{idx}"),
+                callback_data=_safe_callback(f"s:add:{chat_id}:{idx}"),
             )
-
-    # 2. Кастомные НП из БД (не входящие в LOCALITIES)
     for sid, loc, _ in rows:
         if loc not in LOCALITIES:
             b.button(
                 text=_safe_button_text(f"✅ {loc}"),
-                callback_data=_safe_callback(f"subs:rm:{sid}"),
+                callback_data=_safe_callback(f"s:rm:{chat_id}:{sid}"),
             )
-
-    # 3. Служебные кнопки
-    b.button(text="➕ Добавить свой НП", callback_data="subs:custom")
-    b.button(text="🗑 Очистить всё", callback_data="subs:clear")
-    b.button(text="⬅️ Назад", callback_data="menu:main")
+    b.button(text="➕ Добавить свой НП", callback_data=f"s:custom:{chat_id}")
+    b.button(text="🗑 Очистить всё", callback_data=f"s:clear:{chat_id}")
+    b.button(text="⬅️ Назад", callback_data=f"m:main:{chat_id}")
     b.adjust(1)
     return b.as_markup()
 
@@ -199,7 +166,7 @@ async def prio_menu_kb(chat_id: int) -> tuple[InlineKeyboardMarkup, str]:
     rows = await db.get_subscriptions_with_ids(chat_id)
     b = InlineKeyboardBuilder()
     if not rows:
-        b.button(text="⬅️ Назад", callback_data="menu:main")
+        b.button(text="⬅️ Назад", callback_data=f"m:main:{chat_id}")
         return (
             b.as_markup(),
             "📭 Подписок пока нет.\nСначала выберите НП в разделе «⚙️ Подписки».",
@@ -216,22 +183,22 @@ async def prio_menu_kb(chat_id: int) -> tuple[InlineKeyboardMarkup, str]:
     for sid, loc, _prio in rows:
         b.button(
             text=_safe_button_text(f"⬆️ {loc}"),
-            callback_data=_safe_callback(f"prio:up:{sid}"),
+            callback_data=_safe_callback(f"p:up:{chat_id}:{sid}"),
         )
         b.button(
             text=_safe_button_text(f"⬇️ {loc}"),
-            callback_data=_safe_callback(f"prio:down:{sid}"),
+            callback_data=_safe_callback(f"p:down:{chat_id}:{sid}"),
         )
-    b.button(text="⬅️ Назад", callback_data="menu:main")
+    b.button(text="⬅️ Назад", callback_data=f"m:main:{chat_id}")
     b.adjust(2)
     return b.as_markup(), "\n".join(lines)
 
 
-async def dates_menu_kb() -> tuple[InlineKeyboardMarkup, str]:
+async def dates_menu_kb(chat_id: int) -> tuple[InlineKeyboardMarkup, str]:
     dates = await db.get_available_dates()
     b = InlineKeyboardBuilder()
     if not dates:
-        b.button(text="⬅️ Назад", callback_data="menu:main")
+        b.button(text="⬅️ Назад", callback_data=f"m:main:{chat_id}")
         return (
             b.as_markup(),
             "📭 Данных пока нет.\nДождитесь первой проверки сайта.",
@@ -239,9 +206,9 @@ async def dates_menu_kb() -> tuple[InlineKeyboardMarkup, str]:
     for d in dates[:20]:
         b.button(
             text=_safe_button_text(f"📅 {d}"),
-            callback_data=_safe_callback(f"date:{d}"),
+            callback_data=_safe_callback(f"d:{chat_id}:{d}"),
         )
-    b.button(text="⬅️ Назад", callback_data="menu:main")
+    b.button(text="⬅️ Назад", callback_data=f"m:main:{chat_id}")
     b.adjust(2)
     return b.as_markup(), "📅 Выберите дату:"
 
@@ -249,56 +216,14 @@ async def dates_menu_kb() -> tuple[InlineKeyboardMarkup, str]:
 def help_text() -> str:
     return (
         "ℹ️ <b>Справка</b>\n\n"
-        "• <b>⚙️ Подписки</b> — выберите населённые пункты или впишите свой "
-        "(например, «СНТ Фауна» или «Петровское»). Поиск идёт по району и адресу.\n"
-        "• <b>🏆 Приоритет</b> — если на одну дату есть отключения в нескольких НП, "
-        "уведомление придёт только по «главному» (верхнему).\n"
-        "• <b>📅 Отключения</b> — просмотр всех записей по вашим НП на выбранную дату.\n\n"
-        "⚙️ Управление доступно только администратору."
+        "• <b>⚙️ Подписки</b> — выберите населённые пункты или впишите свой.\n"
+        "• <b>🏆 Приоритет</b> — если на одну дату есть отключения в разных НП, "
+        "придёт только по «главному» (верхнему).\n"
+        "• <b>📅 Отключения</b> — просмотр всех записей на выбранную дату.\n\n"
+        "Все настройки применяются к выбранной группе.\n"
+        "Уведомления приходят в саму группу."
     )
 
-
-# =========================================================
-#                ТОЧКА ВХОДА (публичное)
-# =========================================================
-
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    chat = message.chat
-
-    if chat.type in ("group", "supergroup"):
-        # В группе приветствие показываем только админам
-        if not is_admin(message.from_user.id):
-            return
-        await db.upsert_chat(chat.id, chat.title or "Группа")
-        b = InlineKeyboardBuilder()
-        b.button(
-            text=_safe_button_text(f"⚙️ Настроить: {chat.title or 'группу'}"),
-            callback_data="grp:open",
-        )
-        await message.answer(
-            f"🕯 <b>NoLightToday</b>\n\n"
-            f"Бот следит за плановыми отключениями электроэнергии "
-            f"на сайте Россети Ленэнерго.\n"
-            f"Группа: <b>{chat.title or 'без названия'}</b>\n\n"
-            f"Нажмите кнопку ниже, чтобы открыть настройки, "
-            f"или используйте reply-кнопку «📋 Меню».",
-            reply_markup=reply_menu_kb(),
-            parse_mode="HTML",
-        )
-        await message.answer(
-            "Настройки группы:",
-            reply_markup=b.as_markup(),
-        )
-        return
-
-    # личка
-    await message.answer(
-        "🕯 <b>NoLightToday</b>\n\n"
-        "Добавьте бота в группу — там появятся настройки отслеживания "
-        "отключений.",
-        parse_mode="HTML",
-    )
 
 # =========================================================
 #               ДОБАВЛЕНИЕ БОТА В ГРУППУ
@@ -306,7 +231,6 @@ async def cmd_start(message: Message):
 
 @dp.my_chat_member()
 async def on_bot_added_to_chat(update: ChatMemberUpdated):
-    """Ловит добавление и удаление бота в группе."""
     chat = update.chat
     if chat.type not in ("group", "supergroup"):
         return
@@ -314,29 +238,26 @@ async def on_bot_added_to_chat(update: ChatMemberUpdated):
     old_status = update.old_chat_member.status
     new_status = update.new_chat_member.status
 
-    # --- Бот добавлен в группу ---
     if new_status in ("member", "administrator") and old_status in ("left", "kicked"):
         await db.upsert_chat(chat.id, chat.title or "Группа")
 
+        # Кнопка ведёт в личку с ботом, в deep-link передаём chat_id
+        url = f"https://t.me/{BOT_USERNAME}?start=g_{chat.id}"
         b = InlineKeyboardBuilder()
-        b.button(
-            text=_safe_button_text(f"⚙️ Настроить: {chat.title or 'группу'}"),
-            callback_data="grp:open",
-        )
+        b.button(text="⚙️ Настроить", url=url)
+
         try:
             await bot.send_message(
                 chat.id,
                 f"🕯 <b>NoLightToday</b> подключён к группе "
                 f"<b>{chat.title or 'без названия'}</b>.\n\n"
-                f"Нажмите кнопку ниже, чтобы выбрать населённые пункты "
-                f"и настроить отслеживание отключений.",
+                f"Настройки — в личке с ботом. Нажмите кнопку ниже.",
                 reply_markup=b.as_markup(),
                 parse_mode="HTML",
             )
         except Exception as e:
             log.warning("Не удалось отправить приветствие в %s: %s", chat.id, e)
 
-        # Уведомим админов в личку
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(
@@ -346,73 +267,115 @@ async def on_bot_added_to_chat(update: ChatMemberUpdated):
                     parse_mode="HTML",
                 )
             except Exception:
-                pass  # админ не начинал диалог с ботом
+                pass
 
-    # --- Бот удалён из группы ---
     elif new_status in ("left", "kicked"):
         await db.delete_chat(chat.id)
         log.info("Бот удалён из группы %s (%s)", chat.title, chat.id)
 
 
-@dp.message(Command("setup"), F.chat.type.in_({"group", "supergroup"}))
-async def cmd_setup(message: Message):
-    """Ручной вызов приветствия с кнопкой настроек."""
+# =========================================================
+#                       /start
+# =========================================================
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message, command: CommandObject):
+    chat = message.chat
+
+    # В группе — молчим (приветствие уже ушло при добавлении)
+    if chat.type in ("group", "supergroup"):
+        return
+
+    # В личке — показываем список групп
     if not is_admin(message.from_user.id):
         return
 
-    chat = message.chat
-    await db.upsert_chat(chat.id, chat.title or "Группа")
+    payload = (command.args or "").strip()
 
-    b = InlineKeyboardBuilder()
-    b.button(
-        text=_safe_button_text(f"⚙️ Настроить: {chat.title or 'группу'}"),
-        callback_data="grp:open",
-    )
-    await message.answer(
-        f"⚙️ Настройки группы <b>{chat.title}</b>:",
-        reply_markup=b.as_markup(),
-        parse_mode="HTML",
-    )
+    # Deep-link: /start g_<chat_id>
+    if payload.startswith("g_"):
+        try:
+            chat_id = int(payload[2:])
+        except ValueError:
+            chat_id = None
+        if chat_id is not None:
+            title = await db.get_chat_title(chat_id)
+            if title and await is_group_admin(chat_id, message.from_user.id):
+                await db.upsert_chat(chat_id, title)
+                await message.answer(
+                    f"⚙️ <b>Настройки группы</b>\n<b>{title}</b>\n\n"
+                    f"Все изменения будут применяться именно к ней.",
+                    reply_markup=main_menu_kb(chat_id),
+                    parse_mode="HTML",
+                )
+                return
 
-
-@dp.callback_query(F.data == "grp:open")
-async def cb_group_open(cb: CallbackQuery):
-    """Открывает меню настроек для группы, где нажата кнопка."""
-    if not await require_admin_callback(cb):
-        return
-    await cb.answer()
-
-    chat = cb.message.chat if cb.message is not None else None
-    if chat is None or chat.type not in ("group", "supergroup"):
-        await safe_edit_message(
-            cb,
-            "Эта кнопка работает только в группе. "
-            "Добавьте бота в группу и нажмите её там.",
-            reply_markup=None,
+    groups = await user_admin_groups(message.from_user.id)
+    if not groups:
+        await message.answer(
+            "🕯 <b>NoLightToday</b>\n\n"
+            "Добавьте бота в группу — там появится кнопка для настройки.",
+            parse_mode="HTML",
         )
         return
 
-    await db.upsert_chat(chat.id, chat.title or "Группа")
-
-    await safe_edit_message(
-        cb,
-        f"⚙️ <b>Настройки группы</b>\n"
-        f"<b>{chat.title or 'без названия'}</b>\n\n"
-        f"Все изменения будут применяться именно к этой группе.\n\n"
-        f"Выберите раздел:",
-        reply_markup=main_menu_kb(),
+    await message.answer(
+        "🕯 <b>NoLightToday</b>\n\nВыберите группу для настройки:",
+        reply_markup=groups_kb(groups),
+        parse_mode="HTML",
     )
 
 
-@dp.message(F.text == "📋 Меню")
-@dp.message(Command("menu"))
-async def open_menu(message: Message):
-    if not is_admin(message.from_user.id):
+# =========================================================
+#                ВЫБОР ГРУППЫ
+# =========================================================
+
+@dp.callback_query(F.data == "g:list")
+async def cb_group_list(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        await cb.answer("⛔ Только для администратора", show_alert=True)
         return
-    await message.answer(
-        "📋 <b>Главное меню</b>\nВыберите раздел:",
-        reply_markup=main_menu_kb(),
-        parse_mode="HTML",
+    await cb.answer()
+
+    groups = await user_admin_groups(cb.from_user.id)
+    if not groups:
+        await safe_edit_message(
+            cb,
+            "🕯 Нет групп, где вы админ и где есть бот.",
+            reply_markup=None,
+        )
+        return
+    await safe_edit_message(
+        cb,
+        "Выберите группу для настройки:",
+        reply_markup=groups_kb(groups),
+    )
+
+
+@dp.callback_query(F.data.startswith("g:") & ~F.data.startswith("g:list"))
+async def cb_group_select(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        await cb.answer("⛔ Только для администратора", show_alert=True)
+        return
+    await cb.answer()
+
+    try:
+        chat_id = int(cb.data.split(":", 1)[1])
+    except ValueError:
+        return
+
+    title = await db.get_chat_title(chat_id)
+    if not title or not await is_group_admin(chat_id, cb.from_user.id):
+        await safe_edit_message(
+            cb, "⛔ Эта группа недоступна.", reply_markup=None
+        )
+        return
+
+    await safe_edit_message(
+        cb,
+        f"⚙️ <b>Настройки группы</b>\n<b>{title}</b>\n\n"
+        f"Все изменения будут применяться именно к ней.",
+        reply_markup=main_menu_kb(chat_id),
     )
 
 
@@ -420,193 +383,170 @@ async def open_menu(message: Message):
 #                НАВИГАЦИЯ ПО МЕНЮ
 # =========================================================
 
-@dp.callback_query(F.data == "menu:main")
+async def _guard(cb: CallbackQuery, chat_id: int) -> bool:
+    """Проверяет права пользователя на управление группой chat_id."""
+    if not is_admin(cb.from_user.id):
+        await cb.answer("⛔ Только для администратора", show_alert=True)
+        return False
+    if not await is_group_admin(chat_id, cb.from_user.id):
+        await cb.answer("⛔ Вы не админ этой группы", show_alert=True)
+        return False
+    return True
+
+
+@dp.callback_query(F.data.startswith("m:main:"))
 async def cb_main(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    chat_id = int(cb.data.rsplit(":", 1)[1])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
+    await db.clear_awaiting(cb.from_user.id)
 
-    chat_id = _chat_id_from_cb(cb)
-    await db.clear_awaiting(chat_id)
-
+    title = await db.get_chat_title(chat_id) or "группа"
     await safe_edit_message(
         cb,
-        "📋 <b>Главное меню</b>\nВыберите раздел:",
-        reply_markup=main_menu_kb(),
+        f"⚙️ <b>Настройки группы</b>\n<b>{title}</b>\n\nВыберите раздел:",
+        reply_markup=main_menu_kb(chat_id),
     )
 
 
-@dp.callback_query(F.data == "menu:help")
+@dp.callback_query(F.data.startswith("m:help:"))
 async def cb_help(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    chat_id = int(cb.data.rsplit(":", 1)[1])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
     await safe_edit_message(
-        cb, help_text(), reply_markup=back_to_main_kb()
+        cb, help_text(), reply_markup=back_to_main_kb(chat_id)
     )
 
 
-# ---------- Раздел «Подписки» ----------
+# ---------- Подписки ----------
 
-@dp.callback_query(F.data == "menu:subs")
+@dp.callback_query(F.data.startswith("m:subs:"))
 async def cb_subs(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    chat_id = int(cb.data.rsplit(":", 1)[1])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
-
-    chat_id = _chat_id_from_cb(cb)
-    await db.clear_awaiting(chat_id)
+    await db.clear_awaiting(cb.from_user.id)
 
     kb = await subs_menu_kb(chat_id)
     await safe_edit_message(
         cb,
-        "⚙️ <b>Подписки</b>\nОтметьте населённые пункты (можно несколько) "
-        "или добавьте свой:",
+        "⚙️ <b>Подписки</b>\nОтметьте НП (можно несколько) или добавьте свой:",
         reply_markup=kb,
     )
 
 
-@dp.callback_query(F.data.startswith("subs:add:"))
+@dp.callback_query(F.data.startswith("s:add:"))
 async def cb_subs_add(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    parts = cb.data.split(":")
+    chat_id = int(parts[2])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
     try:
-        idx = int(cb.data.split(":")[-1])
-    except ValueError:
+        idx = int(parts[3])
+    except (ValueError, IndexError):
         return
     if not (0 <= idx < len(LOCALITIES)):
         return
-    loc = LOCALITIES[idx]
-    chat_id = _chat_id_from_cb(cb)
-    if cb.message is not None:
-        await db.upsert_chat(chat_id, cb.message.chat.title or "Группа")
-    await db.toggle_subscription(chat_id, loc)
-    kb = await subs_menu_kb(chat_id)
-    await safe_edit_markup(cb, kb)
+    await db.toggle_subscription(chat_id, LOCALITIES[idx])
+    await safe_edit_markup(cb, await subs_menu_kb(chat_id))
 
 
-@dp.callback_query(F.data.startswith("subs:rm:"))
+@dp.callback_query(F.data.startswith("s:rm:"))
 async def cb_subs_rm(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    parts = cb.data.split(":")
+    chat_id = int(parts[2])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
     try:
-        sid = int(cb.data.split(":")[-1])
-    except ValueError:
+        sid = int(parts[3])
+    except (ValueError, IndexError):
         return
-    chat_id = _chat_id_from_cb(cb)
     await db.delete_subscription_by_id(chat_id, sid)
-    kb = await subs_menu_kb(chat_id)
-    await safe_edit_markup(cb, kb)
+    await safe_edit_markup(cb, await subs_menu_kb(chat_id))
 
 
-@dp.callback_query(F.data == "subs:clear")
+@dp.callback_query(F.data.startswith("s:clear:"))
 async def cb_subs_clear(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    chat_id = int(cb.data.rsplit(":", 1)[1])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer("Все подписки удалены")
-    chat_id = _chat_id_from_cb(cb)
     await db.clear_subscriptions(chat_id)
-    kb = await subs_menu_kb(chat_id)
-    await safe_edit_markup(cb, kb)
+    await safe_edit_markup(cb, await subs_menu_kb(chat_id))
 
 
 # ---------- Ручной ввод НП ----------
 
-@dp.callback_query(F.data == "subs:custom")
+@dp.callback_query(F.data.startswith("s:custom:"))
 async def cb_subs_custom(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    chat_id = int(cb.data.rsplit(":", 1)[1])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
 
-    chat_id = _chat_id_from_cb(cb)
-    await db.set_awaiting(chat_id, cb.from_user.id, "locality")
+    # awaiting по user_id, но помним chat_id группы
+    await db.set_awaiting(cb.from_user.id, chat_id, "locality")
 
     b = InlineKeyboardBuilder()
-    b.button(text="❌ Отмена", callback_data="subs:custom_cancel")
+    b.button(text="❌ Отмена", callback_data=f"s:cancel:{chat_id}")
     await safe_edit_message(
         cb,
         "✏️ <b>Свой населённый пункт</b>\n\n"
-        "Введите название (можно часть). Бот ищет совпадение в полях\n"
-        "«Район / Населённый пункт» и «Адрес».\n\n"
+        "Отправьте название следующим сообщением.\n\n"
         "<b>Примеры:</b>\n"
         "• <code>СНТ Фауна</code>\n"
         "• <code>Петровское</code>\n"
-        "• <code>Ломоносовский</code>\n\n"
-        "Отправьте название следующим сообщением.",
+        "• <code>Ломоносовский</code>",
         reply_markup=b.as_markup(),
     )
 
 
-@dp.callback_query(F.data == "subs:custom_cancel")
-async def cb_subs_custom_cancel(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+@dp.callback_query(F.data.startswith("s:cancel:"))
+async def cb_subs_cancel(cb: CallbackQuery):
+    chat_id = int(cb.data.rsplit(":", 1)[1])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
-
-    chat_id = _chat_id_from_cb(cb)
-    await db.clear_awaiting(chat_id)
+    await db.clear_awaiting(cb.from_user.id)
 
     kb = await subs_menu_kb(chat_id)
     await safe_edit_message(
         cb,
-        "⚙️ <b>Подписки</b>\nОтметьте населённые пункты (можно несколько) "
-        "или добавьте свой:",
+        "⚙️ <b>Подписки</b>\nОтметьте НП (можно несколько) или добавьте свой:",
         reply_markup=kb,
     )
 
 
-async def _add_locality_and_reply(
-    chat_id: int, text: str
-) -> tuple[str, InlineKeyboardMarkup]:
-    """Общая логика добавления НП. Возвращает (текст, клавиатура)."""
-    all_dates = await db.get_available_dates()
-    has_any = False
-    for d in all_dates:
-        cached = await db.get_cache_by_date(d)
-        if any(matches_locality(o, text) for o in cached):
-            has_any = True
-            break
+# ---------- Приоритет ----------
 
-    await db.toggle_subscription(chat_id, text)
-    kb = await subs_menu_kb(chat_id)
-
-    if has_any:
-        hint = "✅ Совпадения в текущем кэше найдены — уведомления будут приходить."
-    else:
-        hint = (
-            "⚠️ В текущем кэше совпадений пока нет. "
-            "Если это ожидаемо (отключений ещё не публиковали) — всё в порядке."
-        )
-
-    text_msg = (
-        f"✅ Добавлено: <b>{text}</b>\n{hint}\n\n"
-        f"⚙️ <b>Подписки</b>\nОтметьте населённые пункты (можно несколько) "
-        f"или добавьте свой:"
-    )
-    return text_msg, kb
-
-
-# ---------- Раздел «Приоритет» ----------
-
-@dp.callback_query(F.data == "menu:prio")
+@dp.callback_query(F.data.startswith("m:prio:"))
 async def cb_prio(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    chat_id = int(cb.data.rsplit(":", 1)[1])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
-    kb, text = await prio_menu_kb(_chat_id_from_cb(cb))
+    kb, text = await prio_menu_kb(chat_id)
     await safe_edit_message(cb, text, reply_markup=kb)
 
 
-@dp.callback_query(F.data.startswith("prio:"))
+@dp.callback_query(F.data.startswith("p:up:") | F.data.startswith("p:down:"))
 async def cb_prio_move(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    parts = cb.data.split(":")
+    direction = parts[1]
+    chat_id = int(parts[2])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
-    _, direction, sid = cb.data.split(":")
-    sid = int(sid)
-    chat_id = _chat_id_from_cb(cb)
+    try:
+        sid = int(parts[3])
+    except (ValueError, IndexError):
+        return
 
     rows = await db.get_subscriptions_with_ids(chat_id)
     ids = [r[0] for r in rows]
@@ -621,31 +561,31 @@ async def cb_prio_move(cb: CallbackQuery):
     await safe_edit_message(cb, text, reply_markup=kb)
 
 
-# ---------- Раздел «Отключения» ----------
+# ---------- Отключения ----------
 
-@dp.callback_query(F.data == "menu:dates")
+@dp.callback_query(F.data.startswith("m:dates:"))
 async def cb_dates(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    chat_id = int(cb.data.rsplit(":", 1)[1])
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
-    kb, text = await dates_menu_kb()
+    kb, text = await dates_menu_kb(chat_id)
     await safe_edit_message(cb, text, reply_markup=kb)
 
 
-@dp.callback_query(F.data.startswith("date:"))
+@dp.callback_query(F.data.startswith("d:"))
 async def cb_date_show(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
+    # d:<chat_id>:<date_key>
+    parts = cb.data.split(":", 2)
+    chat_id = int(parts[1])
+    date_key = parts[2]
+    if not await _guard(cb, chat_id):
         return
     await cb.answer()
-    date_key = cb.data.split(":", 1)[1]
-    chat_id = _chat_id_from_cb(cb)
 
     cached = await db.get_cache_by_date(date_key)
     subs = await db.get_subscribed_localities(chat_id)
-    items = [
-        o for o in cached
-        if any(matches_locality(o, loc) for loc in subs)
-    ]
+    items = [o for o in cached if any(matches_locality(o, loc) for loc in subs)]
 
     if not items:
         text = f"📭 На {date_key} по вашим НП отключений нет."
@@ -657,57 +597,71 @@ async def cb_date_show(cb: CallbackQuery):
             text = text[:3980] + "\n…обрезано"
 
     b = InlineKeyboardBuilder()
-    b.button(text="⬅️ Назад", callback_data="menu:dates")
+    b.button(text="⬅️ Назад", callback_data=f"m:dates:{chat_id}")
     await safe_edit_message(cb, text, reply_markup=b.as_markup())
 
 
 # =========================================================
-#                ВВОД НАЗВАНИЯ НП (без FSM)
+#                ВВОД НАЗВАНИЯ НП (в личке)
 # =========================================================
 
 @dp.message(F.text, ~F.text.startswith("/"))
 async def fallback_text(message: Message):
-    """Реагирует ТОЛЬКО когда бот ждёт ввод названия НП.
+    """В личке принимает ввод названия НП, если ждём.
 
-    Во всех остальных случаях молчит — чтобы не мешать общению в группе.
+    В группе молчит.
     """
+    # В группе — молчим всегда
+    if message.chat.type in ("group", "supergroup"):
+        return
+
+    # В личке — только админам
     if not is_admin(message.from_user.id):
         return
 
-    text = (message.text or "").strip()
-
-    # Reply-кнопка «📋 Меню» ловится отдельным хендлером
-    if text == "📋 Меню":
+    awaiting = await db.get_awaiting(message.from_user.id)
+    if awaiting is None:
         return
 
-    chat_id = message.chat.id
-
-    # Единственный случай, когда реагируем — ждём ввод названия НП
-    awaiting = await db.get_awaiting(chat_id)
-    if awaiting is None:
-        return  # ← ключевое: молчим
-
-    _user_id, kind = awaiting
+    chat_id, kind = awaiting
     if kind != "locality":
         return
 
-    # Сбрасываем флаг сразу — дальше нечего ждать
-    await db.clear_awaiting(chat_id)
+    await db.clear_awaiting(message.from_user.id)
 
+    text = (message.text or "").strip()
     if not text:
-        await message.answer(
-            "Пустая строка. Нажмите «➕ Добавить свой НП» ещё раз."
-        )
+        await message.answer("Пустая строка. Нажмите «➕ Добавить свой НП» снова.")
         return
     if len(text) > 100:
-        await message.answer(
-            "Слишком длинное название (максимум 100 символов)."
-        )
+        await message.answer("Слишком длинное название (максимум 100 символов).")
         return
 
-    await db.upsert_chat(chat_id, message.chat.title or "Группа")
-    reply_text, kb = await _add_locality_and_reply(chat_id, text)
-    await message.answer(reply_text, reply_markup=kb, parse_mode="HTML")
+    # Проверяем, есть ли совпадения в кэше
+    all_dates = await db.get_available_dates()
+    has_any = False
+    for d in all_dates:
+        cached = await db.get_cache_by_date(d)
+        if any(matches_locality(o, text) for o in cached):
+            has_any = True
+            break
+
+    await db.toggle_subscription(chat_id, text)
+    kb = await subs_menu_kb(chat_id)
+
+    hint = (
+        "✅ Совпадения в текущем кэше найдены — уведомления будут приходить."
+        if has_any
+        else "⚠️ В текущем кэше совпадений пока нет. "
+             "Если это ожидаемо — всё в порядке."
+    )
+
+    await message.answer(
+        f"✅ Добавлено: <b>{text}</b>\n{hint}\n\n"
+        f"⚙️ <b>Подписки</b>\nОтметьте НП (можно несколько) или добавьте свой:",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
 
 
 # =========================================================

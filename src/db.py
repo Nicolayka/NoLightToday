@@ -38,9 +38,9 @@ CREATE TABLE IF NOT EXISTS chats (
 );
 
 CREATE TABLE IF NOT EXISTS awaiting_input (
-    chat_id    INTEGER PRIMARY KEY,
-    user_id    INTEGER NOT NULL,
-    kind       TEXT NOT NULL,            -- сейчас только 'locality'
+    user_id    INTEGER PRIMARY KEY,
+    chat_id    INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -50,9 +50,18 @@ CREATE INDEX IF NOT EXISTS idx_cache_date ON outage_cache(date_key);
 
 
 async def init_db() -> None:
-    """Создаёт файл БД и таблицы, если их ещё нет."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        # Миграция: если awaiting_input старой схемы (по chat_id) — удалим
+        async with db.execute("PRAGMA table_info(awaiting_input)") as cur:
+            cols = await cur.fetchall()
+        if cols:
+            names = {c[1] for c in cols}
+            if "user_id" in names and "chat_id" in names and "kind" not in names:
+                pass  # уже новая
+            elif "user_id" not in names:
+                await db.execute("DROP TABLE awaiting_input")
+
         await db.executescript(CREATE_SQL)
         await db.commit()
 
@@ -273,31 +282,32 @@ async def get_chat_title(chat_id: int) -> str | None:
             row = await cur.fetchone()
             return row[0] if row else None
             
-# ---------- Ожидание ввода ----------
+# ---------- Ожидание ввода (в личке) ----------
 
-async def set_awaiting(chat_id: int, user_id: int, kind: str = "locality") -> None:
+async def set_awaiting(user_id: int, chat_id: int, kind: str = "locality") -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR REPLACE INTO awaiting_input (chat_id, user_id, kind) "
+            "INSERT OR REPLACE INTO awaiting_input (user_id, chat_id, kind) "
             "VALUES (?, ?, ?)",
-            (chat_id, user_id, kind),
+            (user_id, chat_id, kind),
         )
         await db.commit()
 
 
-async def get_awaiting(chat_id: int) -> tuple[int, str] | None:
+async def get_awaiting(user_id: int) -> tuple[int, str] | None:
+    """Возвращает (chat_id группы, kind) или None."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT user_id, kind FROM awaiting_input WHERE chat_id = ?",
-            (chat_id,),
+            "SELECT chat_id, kind FROM awaiting_input WHERE user_id = ?",
+            (user_id,),
         ) as cur:
             row = await cur.fetchone()
             return (row[0], row[1]) if row else None
 
 
-async def clear_awaiting(chat_id: int) -> None:
+async def clear_awaiting(user_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "DELETE FROM awaiting_input WHERE chat_id = ?", (chat_id,)
+            "DELETE FROM awaiting_input WHERE user_id = ?", (user_id,)
         )
         await db.commit()

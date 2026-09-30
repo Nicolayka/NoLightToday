@@ -49,3 +49,5 @@ LOCALITIES = [
     "Сосновый Бор",
     "Луга",
 ]
+
+BOT_USERNAME = "NoLightToday_bot"   # без @, для deep-link
