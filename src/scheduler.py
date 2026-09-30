@@ -45,23 +45,27 @@ async def fetch_all_outages() -> list[dict]:
 def format_outage(o: dict) -> str:
     """Формирует текст уведомления. Пропускает пустые поля.
 
-    Адрес разбивается на отдельные части (тер., д., ул., СНТ и т.д.)
-    и выводится списком — длинные адреса читаются легче.
+    Адрес разбивается на отдельные части (тер., д., ул., СНТ и т.д.).
+    Логические блоки разделены пустой строкой для читаемости.
     """
     import re
 
-    lines: list[str] = ["⚡ <b>Плановое отключение</b>"]
+    # Каждый блок — отдельный список строк
+    blocks: list[str] = []
+
+    # 1. Заголовок
+    blocks.append("⚡ <b>Плановое отключение</b>")
+
+    # 2. Локация: район + адрес
+    loc_lines: list[str] = []
 
     district = (o.get("district") or "").strip()
     address = (o.get("address") or "").strip()
 
-    # Район — отдельной строкой с жирным
     if district:
-        lines.append(f"📍 <b>{district}</b>")
+        loc_lines.append(f"📍 <b>{district}</b>")
 
-    # Адрес — разбиваем на части и выводим списком
     if address:
-        # Разделяем по маркерам, сохраняя сам маркер в начале части
         parts = re.split(
             r"\s+(?=тер\.|д\.|д |п |с |г\.|г |ш |ул |пер\.|снт |днп |с/п )",
             address,
@@ -70,37 +74,64 @@ def format_outage(o: dict) -> str:
 
         if len(parts) > 1:
             for p in parts:
-                lines.append(f"   • {p}")
+                loc_lines.append(f"   • {p}")
         else:
-            lines.append(f"   {address[:200]}{'…' if len(address) > 200 else ''}")
+            loc_lines.append(
+                f"   {address[:200]}{'…' if len(address) > 200 else ''}"
+            )
 
-    # Время
-    start = (o.get("start") or "").strip()
-    end = (o.get("end") or "").strip()
+    if loc_lines:
+        blocks.append("\n".join(loc_lines))
+
+    # 3. Время
+    start = _pretty_dt((o.get("start") or "").strip())
+    end = _pretty_dt((o.get("end") or "").strip())
     if start or end:
-        lines.append(f"🕒 {start} → {end}")
+        blocks.append(f"🕒 {start} → {end}")
 
-    # Филиал / РЭС — только если что-то есть
+    # 4. Филиал / РЭС
     branch = (o.get("branch") or "").strip()
     res = (o.get("res") or "").strip()
     if branch or res:
         org = " / ".join(p for p in (branch, res) if p)
-        lines.append(f"🏢 {org}")
+        blocks.append(f"🏢 {org}")
 
-    # Комментарий
+    # 5. Комментарий
+    # comment = (o.get("comment") or "").strip()
+    # if comment:
+        # # «Согласование 329» → «Согласование № 329»
+        # # «Заявка 1234» → «Заявка № 1234»
+        # # «Договор 55» → «Договор № 55»
+        # comment = re.sub(
+            # r"^(Согласование|Заявка|Договор|Распоряжение|Предписание)\s+(\d+)\s*$",
+            # r"\1 № \2",
+            # comment,
+            # flags=re.IGNORECASE,
+        # )
+        # blocks.append(f"💬 {comment}")
+    # 5. Комментарий (скрываем строки «Согласование …»)
     comment = (o.get("comment") or "").strip()
-    if comment:
-        # «Согласование 329» → «Согласование № 329»
-        # «Заявка 1234» → «Заявка № 1234»
-        # «Договор 55» → «Договор № 55»
-        comment = re.sub(
-            r"^(Согласование|Заявка|Договор|Распоряжение|Предписание)\s+(\d+)\s*$",
-            r"\1 № \2",
-            comment,
-            flags=re.IGNORECASE,
-        )
-        lines.append(f"💬 {comment}")
-    return "\n".join(lines)
+    if comment and not re.match(r"^\s*Согласование\b", comment, flags=re.IGNORECASE):
+        blocks.append(f"💬 {comment}")
+
+    # Соединяем блоки пустой строкой
+    return "\n\n".join(blocks)
+
+
+def _pretty_dt(value: str) -> str:
+    """'30-09-2026 09:00' → '30.09.2026 09:00'.
+
+    Меняет только разделители в дате (дефис → точка), время не трогает.
+    Если формат не распознан — возвращает исходную строку.
+    """
+    import re
+
+    if not value:
+        return value
+
+    # DD-MM-YYYY → DD.MM.YYYY
+    return re.sub(r"(\d{2})-(\d{2})-(\d{4})", r"\1.\2.\3", value)
+
 
 def matches_locality(o: dict, needle: str) -> bool:
     """Ищет needle в районе, адресе и населённом пункте (регистронезависимо)."""
@@ -156,11 +187,19 @@ async def notify_all(bot: Bot, outages: list[dict]) -> None:
                     f"в других НП. Откройте «📅 Отключения → {date_key}» в меню."
                 )
 
+            from aiogram.exceptions import TelegramRetryAfter
+
             try:
-                await bot.send_message(
-                    chat_id, _truncate(text), parse_mode="HTML"
-                )
+                await bot.send_message(chat_id, _truncate(text), parse_mode="HTML")
                 await db.mark_sent(chat_id, main["id"])
+            except TelegramRetryAfter as e:
+                print(f"[notify] flood control, retry in {e.retry_after}s")
+                await asyncio.sleep(e.retry_after + 1)
+                try:
+                    await bot.send_message(chat_id, _truncate(text), parse_mode="HTML")
+                    await db.mark_sent(chat_id, main["id"])
+                except Exception as e2:
+                    print(f"[notify] повторная попытка: {e2}")
             except Exception as e:
                 print(f"[notify] чат {chat_id}: {e}")
 

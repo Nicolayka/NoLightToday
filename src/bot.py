@@ -15,7 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 import db
 from config import ADMIN_IDS, BOT_TOKEN, LOCALITIES
-from filters import require_admin_callback, require_admin_message
+from filters import is_admin, require_admin_callback
 from scheduler import format_outage, matches_locality, scheduler
 
 
@@ -88,6 +88,40 @@ async def safe_edit_message(
             )
         except Exception as e2:
             log.warning("Не удалось отправить сообщение: %s", e2)
+
+import asyncio as _asyncio
+
+from aiogram.exceptions import TelegramRetryAfter
+
+
+async def safe_send_message(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    reply_markup=None,
+    parse_mode: str | None = "HTML",
+    retries: int = 3,
+) -> None:
+    """Отправляет сообщение с обработкой TelegramRetryAfter (flood control)."""
+    for attempt in range(retries):
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+            return
+        except TelegramRetryAfter as e:
+            wait = e.retry_after + 1
+            log.warning(
+                "Flood control: ждём %s сек (попытка %s/%s)",
+                wait, attempt + 1, retries,
+            )
+            await _asyncio.sleep(wait)
+        except Exception as e:
+            log.warning("send_message не удался: %s", e)
+            return
 
 
 async def safe_edit_markup(cb: CallbackQuery, reply_markup) -> None:
@@ -233,6 +267,9 @@ async def cmd_start(message: Message):
     chat = message.chat
 
     if chat.type in ("group", "supergroup"):
+        # В группе приветствие показываем только админам
+        if not is_admin(message.from_user.id):
+            return
         await db.upsert_chat(chat.id, chat.title or "Группа")
         b = InlineKeyboardBuilder()
         b.button(
@@ -262,7 +299,6 @@ async def cmd_start(message: Message):
         "отключений.",
         parse_mode="HTML",
     )
-
 
 # =========================================================
 #               ДОБАВЛЕНИЕ БОТА В ГРУППУ
@@ -321,7 +357,7 @@ async def on_bot_added_to_chat(update: ChatMemberUpdated):
 @dp.message(Command("setup"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_setup(message: Message):
     """Ручной вызов приветствия с кнопкой настроек."""
-    if not await require_admin_message(message):
+    if not is_admin(message.from_user.id):
         return
 
     chat = message.chat
@@ -371,7 +407,7 @@ async def cb_group_open(cb: CallbackQuery):
 @dp.message(F.text == "📋 Меню")
 @dp.message(Command("menu"))
 async def open_menu(message: Message):
-    if not await require_admin_message(message):
+    if not is_admin(message.from_user.id):
         return
     await message.answer(
         "📋 <b>Главное меню</b>\nВыберите раздел:",
@@ -631,90 +667,47 @@ async def cb_date_show(cb: CallbackQuery):
 
 @dp.message(F.text, ~F.text.startswith("/"))
 async def fallback_text(message: Message):
-    """Ловит любой текст от админа.
+    """Реагирует ТОЛЬКО когда бот ждёт ввод названия НП.
 
-    1) Если БД говорит «ждём ввод» — добавляем НП.
-    2) Иначе — предлагаем подтвердить добавление через кнопку.
+    Во всех остальных случаях молчит — чтобы не мешать общению в группе.
     """
-    if not await require_admin_message(message):
+    if not is_admin(message.from_user.id):
         return
 
     text = (message.text or "").strip()
 
-    # Reply-кнопка «📋 Меню» ловится хендлером выше — здесь пропускаем
+    # Reply-кнопка «📋 Меню» ловится отдельным хендлером
     if text == "📋 Меню":
         return
 
     chat_id = message.chat.id
 
-    # 1) Ждём ввод от этого чата?
+    # Единственный случай, когда реагируем — ждём ввод названия НП
     awaiting = await db.get_awaiting(chat_id)
-    if awaiting is not None:
-        _user_id, kind = awaiting
-        if kind == "locality":
-            await db.clear_awaiting(chat_id)
-            if not text:
-                await message.answer(
-                    "Пустая строка. Введите название или нажмите «Отмена»."
-                )
-                return
-            if len(text) > 100:
-                await message.answer(
-                    "Слишком длинное название (максимум 100 символов)."
-                )
-                return
+    if awaiting is None:
+        return  # ← ключевое: молчим
 
-            await db.upsert_chat(chat_id, message.chat.title or "Группа")
-            reply_text, kb = await _add_locality_and_reply(chat_id, text)
-            await message.answer(
-                reply_text, reply_markup=kb, parse_mode="HTML"
-            )
-            return
+    _user_id, kind = awaiting
+    if kind != "locality":
+        return
 
-    # 2) Обычный текст — предложим добавить НП
-    looks_like_locality = (
-        0 < len(text) <= 100
-        and "http" not in text.lower()
-        and "\n" not in text
-    )
-    if looks_like_locality:
-        b = InlineKeyboardBuilder()
-        b.button(
-            text=_safe_button_text(f"✅ Да, добавить «{text}»"),
-            callback_data=_safe_callback(f"confirm_add:{text}"),
-        )
-        b.button(text="❌ Отмена", callback_data="menu:main")
-        b.adjust(1)
+    # Сбрасываем флаг сразу — дальше нечего ждать
+    await db.clear_awaiting(chat_id)
+
+    if not text:
         await message.answer(
-            f"Добавить населённый пункт <b>{text}</b> "
-            f"в подписки этого чата?",
-            reply_markup=b.as_markup(),
-            parse_mode="HTML",
+            "Пустая строка. Нажмите «➕ Добавить свой НП» ещё раз."
+        )
+        return
+    if len(text) > 100:
+        await message.answer(
+            "Слишком длинное название (максимум 100 символов)."
         )
         return
 
-    await message.answer(
-        "Не понял команду. Откройте «📋 Меню → ⚙️ Подписки», "
-        "чтобы управлять отслеживанием."
-    )
-
-
-@dp.callback_query(F.data.startswith("confirm_add:"))
-async def cb_confirm_add(cb: CallbackQuery):
-    if not await require_admin_callback(cb):
-        return
-    await cb.answer()
-
-    loc = cb.data.split(":", 1)[1].strip()
-    if not loc:
-        return
-
-    chat_id = _chat_id_from_cb(cb)
-    if cb.message is not None:
-        await db.upsert_chat(chat_id, cb.message.chat.title or "Группа")
-
-    reply_text, kb = await _add_locality_and_reply(chat_id, loc)
-    await safe_edit_message(cb, reply_text, reply_markup=kb)
+    await db.upsert_chat(chat_id, message.chat.title or "Группа")
+    reply_text, kb = await _add_locality_and_reply(chat_id, text)
+    await message.answer(reply_text, reply_markup=kb, parse_mode="HTML")
 
 
 # =========================================================
