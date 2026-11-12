@@ -1,19 +1,25 @@
 import asyncio
+import html
 from collections import defaultdict
 
 from aiogram import Bot
 
 import db
 import re
-from config import CHECK_INTERVAL
-from parser import parse_outages
+from config import ADMIN_IDS, CHECK_INTERVAL
+from parser import FetchError, parse_outages
 
 
-async def fetch_all_outages() -> list[dict]:
+async def fetch_all_outages() -> tuple[list[dict], str]:
     """Обходит подписки и собирает отключения по каждой отдельно.
 
     Сайт без фильтра отдаёт усечённую выборку — поэтому спрашиваем
     именно по каждому НП/адресу, который есть в подписках.
+
+    Возвращает (записи, статус). Статус для db.save_check_status:
+    ok — сайт ответил хотя бы по одному НП,
+    error — сайт не ответил ни по одному НП,
+    no_subs — подписок нет, сайт не проверялся.
     """
     chats = await db.get_all_chats_with_subs()
     localities: set[str] = set()
@@ -23,14 +29,21 @@ async def fetch_all_outages() -> list[dict]:
 
     if not localities:
         print("[scheduler] подписок нет — пропускаю сбор данных")
-        return []
+        return [], "no_subs"
 
     print(f"[scheduler] собираю данные по {len(localities)} НП")
     seen_ids: set[str] = set()
     result: list[dict] = []
+    failed = 0
 
     for loc in sorted(localities):
-        records = parse_outages(street=loc, max_pages=2)
+        try:
+            records = parse_outages(street=loc, max_pages=2)
+        except FetchError as e:
+            failed += 1
+            print(f"[scheduler] '{loc}': {e}")
+            await asyncio.sleep(1)
+            continue
         added = 0
         for r in records:
             if r["id"] not in seen_ids:
@@ -40,7 +53,8 @@ async def fetch_all_outages() -> list[dict]:
         print(f"[scheduler] '{loc}': +{added} записей")
         await asyncio.sleep(1)
 
-    return result
+    status = "error" if failed == len(localities) else "ok"
+    return result, status
 
 def format_outage(o: dict) -> str:
     """Формирует текст уведомления. Пропускает пустые поля.
@@ -148,6 +162,10 @@ def _truncate(text: str, limit: int = 4000) -> str:
 async def notify_all(bot: Bot, outages: list[dict]) -> None:
     chats = await db.get_all_chats_with_subs()
 
+    # Что разослали в группы в этом проходе: outage_id → (запись, [(группа, доставлено)])
+    # По этому списку админы получат копии в личку.
+    for_admins: dict[str, tuple[dict, list[tuple[int, bool]]]] = {}
+
     for chat_id in chats:
         subs = await db.get_subscriptions(chat_id)
         if not subs:
@@ -189,6 +207,7 @@ async def notify_all(bot: Bot, outages: list[dict]) -> None:
                     f"в других НП. Откройте «📅 Отключения → {date_key}» в меню."
                 )
 
+            delivered = False
             try:
                 await bot.send_message(
                     chat_id=chat_id,
@@ -197,14 +216,56 @@ async def notify_all(bot: Bot, outages: list[dict]) -> None:
                     message_thread_id=thread_id,
                 )
                 await db.mark_sent(chat_id, main["id"])
+                delivered = True
             except Exception as e:
                 print(f"[notify] чат {chat_id}: {e}")
+
+            entry = for_admins.setdefault(main["id"], (main, []))
+            entry[1].append((chat_id, delivered))
+
+    await _notify_admins(bot, for_admins)
+
+
+async def _notify_admins(
+    bot: Bot,
+    for_admins: dict[str, tuple[dict, list[tuple[int, bool]]]],
+) -> None:
+    """Шлёт каждому админу в личку копию уведомления и список групп.
+
+    Каждое отключение приходит админу один раз: учёт ведётся в
+    sent_notifications с chat_id = id админа.
+    """
+    for outage_id, (outage, groups) in for_admins.items():
+        lines = []
+        for chat_id, delivered in groups:
+            title = html.escape(await db.get_chat_title(chat_id) or str(chat_id))
+            mark = "✅" if delivered else "❌ не доставлено:"
+            lines.append(f"{mark} {title}")
+        text = (
+            format_outage(outage)
+            + "\n\n📢 <b>Отправлено в группы:</b>\n"
+            + "\n".join(lines)
+        )
+
+        for admin_id in ADMIN_IDS:
+            if await db.already_sent(admin_id, outage_id):
+                continue
+            try:
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text=_truncate(text),
+                    parse_mode="HTML",
+                )
+                await db.mark_sent(admin_id, outage_id)
+            except Exception as e:
+                print(f"[notify] админ {admin_id}: {e}")
 
 
 async def scheduler(bot: Bot) -> None:
     while True:
         try:
-            outages = await fetch_all_outages()      # <── было parse_outages()
+            outages, status = await fetch_all_outages()
+            await db.save_check_status(status, len(outages))
             if outages:
                 await db.save_cache(outages)
                 await notify_all(bot, outages)

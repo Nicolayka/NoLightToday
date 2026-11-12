@@ -59,9 +59,13 @@ async def main() -> None:
               f"{', '.join(loc for loc, _ in subs)}")
 
     print("[force] собираю данные с сайта ...")
-    outages = await fetch_all_outages()
-    print(f"[force] получено записей: {len(outages)}")
+    outages, status = await fetch_all_outages()
+    await db.save_check_status(status, len(outages))
+    print(f"[force] статус: {status}, получено записей: {len(outages)}")
 
+    if status == "error":
+        print("[force] сайт не ответил — см. ошибки [parser] выше")
+        return
     if not outages:
         print("[force] сайт вернул 0 записей — проверьте parser.py и подписки")
         return

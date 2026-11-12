@@ -25,6 +25,7 @@ data/*.sqlite*
 # Секреты
 .env
 config.local.py
+xray.json
 
 # Прочее
 *.log

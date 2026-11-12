@@ -58,6 +58,14 @@ CREATE TABLE IF NOT EXISTS forum_topics (
     PRIMARY KEY (chat_id, thread_id)
 );
 
+-- Итог последней проверки сайта (одна строка, id = 1)
+CREATE TABLE IF NOT EXISTS check_status (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    checked_at TEXT    NOT NULL,     -- UTC, ISO 8601
+    status     TEXT    NOT NULL,     -- ok | error | no_subs
+    records    INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_subs_chat  ON subscriptions(chat_id);
 CREATE INDEX IF NOT EXISTS idx_cache_date ON outage_cache(date_key);
 """
@@ -255,7 +263,37 @@ async def get_available_dates() -> list[str]:
             return (0, 0, 0)
 
     return sorted(dates, key=key)
-    
+
+
+# ---------- Статус проверки сайта ----------
+
+async def save_check_status(status: str, records: int = 0) -> None:
+    """Запоминает время и итог проверки: ok | error | no_subs."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO check_status (id, checked_at, status, records) "
+            "VALUES (1, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "checked_at=excluded.checked_at, status=excluded.status, "
+            "records=excluded.records",
+            (now, status, records),
+        )
+        await db.commit()
+
+
+async def get_check_status() -> tuple[str, str, int] | None:
+    """Возвращает (checked_at_utc_iso, status, records) или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT checked_at, status, records FROM check_status WHERE id = 1"
+        ) as cur:
+            row = await cur.fetchone()
+    return tuple(row) if row else None
+
+
 # ---------- Группы ----------
 
 async def upsert_chat(chat_id: int, title: str) -> None:

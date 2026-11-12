@@ -34,7 +34,7 @@ LOG_DIR = BASE_DIR / "logs"                          # пригодится на
 LOG_DIR.mkdir(exist_ok=True)
 
 # --- Парсер ---
-BASE_URL = "https://rosseti-lenenergo.ru/planned_work/"
+BASE_URL = "https://rosseti-lenenergo.ru/clients/planned_work/"
 MAX_PAGES = 15
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "3600"))
 
@@ -53,3 +53,12 @@ BOT_USERNAME = "NoLightToday_bot"   # без @, для deep-link
 # Пусто = без прокси (для серверов вне РФ).
 import os
 TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "").strip()
+
+# Необязательный запуск Xray вместе с ботом (VLESS → локальный SOCKS5).
+XRAY_BINARY = os.getenv("XRAY_BINARY", "xray").strip()
+_xray_config = os.getenv("XRAY_CONFIG", "").strip()
+XRAY_CONFIG = str(BASE_DIR / _xray_config) if _xray_config else ""
+VLESS_URL = os.getenv("VLESS_URL", "").strip()
+if VLESS_URL:
+    # VLESS имеет приоритет над старым внешним SOCKS/HTTP-прокси.
+    TELEGRAM_PROXY = "socks5://127.0.0.1:10808"

@@ -5,6 +5,7 @@
 """
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -19,10 +20,19 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
-from config import ADMIN_IDS, BOT_USERNAME, BOT_TOKEN, LOCALITIES, TELEGRAM_PROXY
+from config import (
+    ADMIN_IDS,
+    BOT_TOKEN,
+    BOT_USERNAME,
+    CHECK_INTERVAL,
+    LOCALITIES,
+    TELEGRAM_PROXY,
+)
 from filters import is_admin, require_admin_callback
 from scheduler import format_outage, matches_locality, notify_all, scheduler
 from parser import parse_outages
+from config import VLESS_URL, XRAY_BINARY, XRAY_CONFIG
+from telegram_proxy import validate_proxy, xray_proxy
 
 
 # =========================================================
@@ -46,9 +56,12 @@ from config import BOT_TOKEN, TELEGRAM_PROXY
 
 # На RU VPS Telegram блокируется по SNI — идём через прокси.
 # Если TELEGRAM_PROXY пуст — работаем напрямую.
+validate_proxy(TELEGRAM_PROXY, managed=bool(XRAY_CONFIG))
 if TELEGRAM_PROXY:
     _session = AiohttpSession(proxy=TELEGRAM_PROXY)
     log.info("Telegram через прокси: %s", TELEGRAM_PROXY.split("@")[-1])
+    if VLESS_URL:
+        log.info("Telegram через VLESS XHTTP + TLS (Xray)")
 else:
     _session = AiohttpSession()
     log.info("Telegram напрямую (без прокси)")
@@ -225,15 +238,61 @@ async def prio_menu_kb(chat_id: int) -> tuple[InlineKeyboardMarkup, str]:
     return b.as_markup(), "\n".join(lines)
 
 
+# Москва круглый год UTC+3, без перехода на летнее время.
+# Фиксированное смещение не требует tzdata на Windows.
+MSK = timezone(timedelta(hours=3), "МСК")
+
+
+def _fmt_msk(dt: datetime) -> str:
+    return dt.astimezone(MSK).strftime("%d.%m.%Y %H:%M")
+
+
+async def _save_check_status_safe(status: str, records: int) -> None:
+    try:
+        await db.save_check_status(status, records)
+    except Exception as e:
+        log.warning("save_check_status упал: %s", e)
+
+
+async def check_status_text() -> tuple[str, str | None]:
+    """Возвращает (строки о времени проверок, статус последней проверки)."""
+    row = await db.get_check_status()
+    if not row:
+        return "🕒 Сайт ещё не проверялся.", None
+
+    checked_at, status, _records = row
+    last = datetime.fromisoformat(checked_at)
+    nxt = last + timedelta(seconds=CHECK_INTERVAL)
+    text = (
+        f"🕒 Последняя проверка: {_fmt_msk(last)} МСК\n"
+        f"⏭ Следующая проверка: ~{_fmt_msk(nxt)} МСК"
+    )
+    return text, status
+
+
 async def dates_menu_kb(chat_id: int) -> tuple[InlineKeyboardMarkup, str]:
     dates = await db.get_available_dates()
+    status_text, status = await check_status_text()
     b = InlineKeyboardBuilder()
+
     if not dates:
+        if status is None:
+            result = "📭 Данных пока нет. Дождитесь первой проверки сайта."
+        elif status == "no_subs":
+            result = (
+                "📭 Подписок нет, поэтому сайт не проверялся.\n"
+                "Выберите НП в разделе «⚙️ Подписки»."
+            )
+        elif status == "error":
+            result = (
+                "⚠️ Не удалось получить данные с сайта Россети.\n"
+                "Бот повторит попытку при следующей проверке."
+            )
+        else:
+            result = "✅ Информации об отключениях не найдено."
         b.button(text="⬅️ Назад", callback_data=f"m:main:{chat_id}")
-        return (
-            b.as_markup(),
-            "📭 Данных пока нет.\nДождитесь первой проверки сайта.",
-        )
+        return b.as_markup(), f"{status_text}\n\n{result}"
+
     for d in dates[:20]:
         b.button(
             text=_safe_button_text(f"📅 {d}"),
@@ -241,7 +300,14 @@ async def dates_menu_kb(chat_id: int) -> tuple[InlineKeyboardMarkup, str]:
         )
     b.button(text="⬅️ Назад", callback_data=f"m:main:{chat_id}")
     b.adjust(2)
-    return b.as_markup(), "📅 Выберите дату:"
+
+    text = status_text
+    if status == "error":
+        text += (
+            "\n⚠️ Последняя проверка не удалась, "
+            "список может быть устаревшим."
+        )
+    return b.as_markup(), f"{text}\n\n📅 Выберите дату:"
 
 async def topics_menu_kb(chat_id: int) -> InlineKeyboardMarkup:
     topics = await db.get_topics(chat_id)
@@ -766,7 +832,10 @@ async def _check_locality_now(chat_id: int, locality: str) -> tuple[int, list[st
         records = parse_outages(street=locality, max_pages=2)
     except Exception as e:
         log.warning("parse_outages('%s') упал: %s", locality, e)
+        await _save_check_status_safe("error", 0)
         return -1, []
+
+    await _save_check_status_safe("ok", len(records))
 
     if not records:
         return 0, []
@@ -870,13 +939,21 @@ async def fallback_text(message: Message):
 # =========================================================
 
 async def main():
-    await db.init_db()
-    asyncio.create_task(scheduler(bot))
-    print(f"🕯 NoLightToday запущен. Файл БД: {db.DB_PATH}")
-    await dp.start_polling(
-        bot,
-        allowed_updates=dp.resolve_used_update_types(),
-    )
+    try:
+        async with xray_proxy(XRAY_BINARY, XRAY_CONFIG, TELEGRAM_PROXY, VLESS_URL):
+            await db.init_db()
+            task = asyncio.create_task(scheduler(bot))
+            try:
+                print(f"🕯 NoLightToday запущен. Файл БД: {db.DB_PATH}")
+                await dp.start_polling(
+                    bot,
+                    allowed_updates=dp.resolve_used_update_types(),
+                )
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":

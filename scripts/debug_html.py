@@ -17,7 +17,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-BASE_URL = "https://rosseti-lenenergo.ru/planned_work/"
+BASE_URL = "https://rosseti-lenenergo.ru/clients/planned_work/"
 OUT_DIR = Path(__file__).resolve().parent.parent / "debug"
 OUT_DIR.mkdir(exist_ok=True)
 
